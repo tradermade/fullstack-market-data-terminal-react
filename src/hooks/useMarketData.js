@@ -1,8 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { WS_SYMBOL_MAP } from "../constants/constants.jsx";
 
-const WS_URL = "ws://localhost:3001";
 const RECONNECT_DELAY = 3000;
+
+function getProxyWebSocketUrl() {
+  const configured = import.meta.env.VITE_PROXY_WS_URL;
+  if (configured) return configured;
+  if (typeof window === "undefined") return "ws://localhost:3001";
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  if (window.location.port === "5173") {
+    return `${protocol}//${window.location.hostname}:3001`;
+  }
+  return `${protocol}//${window.location.host}`;
+}
 
 export function useMarketData(symbols) {
   const [ticks, setTicks] = useState({});
@@ -41,13 +52,7 @@ export function useMarketData(symbols) {
   }, [sendMessage]);
 
   const connect = useCallback(() => {
-    const apiKey = import.meta.env.VITE_TRADERMADE_WS_API_KEY;
-    if (!apiKey) {
-      setStatus("No API Key configured");
-      return;
-    }
-
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(getProxyWebSocketUrl());
     wsRef.current = ws;
 
     ws.onopen = () => {

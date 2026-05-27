@@ -860,7 +860,7 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-const PORT = 3001;
+const PORT = Number(process.env.PORT) || 3001;
 server.listen(PORT, () => {
   console.log(`🚀 WebSocket proxy + Frontend running on port ${PORT}`);
 });

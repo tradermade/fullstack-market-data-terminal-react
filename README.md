@@ -113,6 +113,7 @@ Note: API calls in the app use relative `/api/...` paths. The production-style f
 
 ```bash
 npm run dev      # Start Vite development server
+npm start        # Start the production Express/WebSocket server
 npm run build    # Build frontend into dist/
 npm run lint     # Run ESLint
 npm run preview  # Preview the Vite production build
@@ -144,22 +145,43 @@ node server.js
 
 The `dist/` directory is generated during the build and should not be committed.
 
-## Docker Notes
+## Docker
 
-This repository does not currently include a `Dockerfile`, but the app is ready for a single-container production setup:
-
-1. Install dependencies with `npm ci`.
-2. Build the frontend with `npm run build`.
-3. Run the app with `node server.js`.
-4. Expose port `3001`.
-5. Pass secrets at runtime with `--env-file .env` or deployment platform secrets.
-6. Mount `data/` as a volume if `active-symbols.json` should persist across container restarts.
-
-Example future run command after adding a Dockerfile:
+Build and run with Docker Compose:
 
 ```bash
-docker run --env-file .env -p 3001:3001 tradermade-fx-dashboard
+docker compose up --build
 ```
+
+Open:
+
+```txt
+http://localhost:3001
+```
+
+The compose setup:
+
+- builds the Vite frontend inside the image
+- runs `server.js` in production mode
+- exposes port `3001`
+- loads secrets from `.env`
+- stores runtime data in a Docker volume mounted at `/app/data`
+
+You can also build and run manually:
+
+```bash
+docker build -t tradermade-fx-dashboard .
+docker run --env-file .env -p 3001:3001 -v tradermade-fx-data:/app/data tradermade-fx-dashboard
+```
+
+The `.env` file is required at runtime and should contain:
+
+```env
+VITE_TRADERMADE_API_KEY=your_rest_api_key
+VITE_TRADERMADE_WS_API_KEY=your_websocket_api_key
+```
+
+The frontend connects back to the same host for WebSocket traffic. For Vite development only, it falls back to `ws://localhost:3001` when the page is served from port `5173`.
 
 ## Git Ignore Policy
 
@@ -176,4 +198,4 @@ The repository should not commit:
 
 - Highcharts stock tools are loaded through CDN scripts in `index.html`.
 - Stock tool icons are served from `public/gfx/stock-icons/`.
-- The frontend currently uses a localhost WebSocket URL in market data modules, which is fine for local use but should be made deployment-aware before hosting on a public domain.
+- The frontend connects to the backend WebSocket proxy on the current host in production.
