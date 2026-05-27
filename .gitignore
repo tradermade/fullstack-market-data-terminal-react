@@ -38,6 +38,9 @@ coverage/
 .eslintcache
 .npm/
 
+# Local assistant/tooling config
+.claude/
+
 # Docker local overrides
 docker-compose.override.yml
 
