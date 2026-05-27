@@ -1,0 +1,155 @@
+@import "tailwindcss";
+
+/* ── Highcharts stock-tools dark theme overrides ──────────────────────────── */
+
+:root {
+  --highcharts-background-color: var(--bg-panel);
+  --highcharts-neutral-color-100: var(--text-primary);
+  --highcharts-neutral-color-80: var(--text-secondary);
+  --highcharts-neutral-color-60: var(--text-dim);
+  --highcharts-neutral-color-20: var(--border-bright);
+  --highcharts-neutral-color-10: var(--border);
+  --highcharts-neutral-color-5: var(--bg-card);
+  --highcharts-neutral-color-3: var(--bg-card);
+}
+
+.highcharts-stocktools-wrapper,
+.highcharts-bindings-wrapper {
+  background: var(--bg-panel) !important;
+  border-right: 1px solid var(--border) !important;
+}
+
+/* Aggressively target ALL list items in the toolbar */
+.highcharts-bindings-wrapper li,
+.highcharts-stocktools-toolbar li {
+  background-color: var(--bg-card) !important;
+  background: var(--bg-card) !important;
+  border-color: var(--border) !important;
+}
+
+/* Menu item buttons - MUST be transparent so li background shows through */
+.highcharts-bindings-wrapper button,
+.highcharts-stocktools-toolbar button,
+.highcharts-menu-item-btn {
+  background-color: transparent !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-size: 24px !important;
+  border: none !important;
+  filter: var(--chart-tool-icon-filter) !important;
+}
+
+/* Hover states - Apply to the li to change the background */
+.highcharts-bindings-wrapper li:hover,
+.highcharts-stocktools-toolbar li:hover,
+.highcharts-bindings-wrapper li.highcharts-active,
+.highcharts-bindings-wrapper li.highcharts-current {
+  background-color: var(--bg-hover) !important;
+  background: var(--bg-hover) !important;
+}
+
+/* Ensure buttons remain transparent on hover */
+.highcharts-bindings-wrapper li:hover button,
+.highcharts-stocktools-toolbar li:hover button {
+  background-color: transparent !important;
+}
+
+/* Menu item buttons */
+.highcharts-menu-item-btn {
+  background-color: transparent !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-size: 24px !important;
+  border: none !important;
+  filter: var(--chart-tool-icon-filter) !important;
+}
+.highcharts-menu-item-btn:hover {
+  background-color: var(--bg-hover) !important;
+}
+
+/* Submenu wrappers */
+ul.highcharts-submenu-wrapper {
+  background-color: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
+}
+
+/* Arrow buttons */
+.highcharts-arrow-left,
+.highcharts-arrow-right,
+.highcharts-arrow-up,
+.highcharts-arrow-down,
+.highcharts-submenu-item-arrow {
+  background-color: transparent !important;
+  filter: var(--chart-tool-icon-filter) !important;
+  border: none !important;
+}
+
+/* Ensure the wrapper list items are dark */
+.highcharts-stocktools-toolbar li,
+.highcharts-bindings-wrapper .highcharts-stocktools-toolbar li {
+  background-color: var(--bg-card) !important;
+  border-color: var(--border) !important;
+}
+
+/* Hide separators and save-chart button */
+.highcharts-separator { display: none; }
+.highcharts-save-chart { display: none !important; }
+
+/* Popup dark theme */
+.highcharts-popup {
+  background-color: var(--bg-panel) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
+}
+.highcharts-popup-main-title { color: var(--text-primary); border-bottom-color: var(--border) !important; }
+.highcharts-indicator-title { color: var(--text-secondary); }
+.highcharts-popup ul, .highcharts-popup li { background-color: transparent !important; }
+.highcharts-popup input, .highcharts-popup select {
+  background-color: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-primary) !important;
+  border-radius: 4px !important;
+}
+.highcharts-popup-lhs-col {
+  background-color: var(--bg-panel) !important;
+  border-right: 1px solid var(--border) !important;
+}
+.highcharts-indicator-list { background-color: var(--bg-panel) !important; }
+.highcharts-indicator-list-item {
+  color: var(--text-secondary) !important;
+  background-color: transparent !important;
+}
+.highcharts-indicator-list-item:hover {
+  background-color: var(--bg-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+button.highcharts-tab-item {
+  background-color: var(--bg-card) !important;
+  color: var(--text-secondary) !important;
+  border: 1px solid var(--border) !important;
+  border-bottom: none !important;
+}
+button.highcharts-tab-item.highcharts-tab-item-active {
+  background-color: var(--bg-panel) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Chart Tooltip Styling */
+.highcharts-tooltip-box {
+  fill: var(--bg-panel) !important;
+  fill-opacity: 0.95 !important;
+  stroke: var(--border) !important;
+}
+
+.highcharts-tooltip span {
+  background-color: var(--bg-panel) !important;
+  color: var(--text-primary) !important;
+  padding: 0 !important; /* Managed by internal div */
+  border-radius: 4px !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
+  z-index: 9999 !important;
+}
