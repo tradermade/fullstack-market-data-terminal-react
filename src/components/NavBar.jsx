@@ -28,6 +28,12 @@ export default function NavBar({ activeMarket, onMarketChange }) {
     } catch {
       // Storage can be unavailable in private browsing.
     }
+    // Notify SettingsModal first so it can strip stale inline overrides for the
+    // *previous* mode (e.g. a dark `--chart-bg` pinned via inline style) before
+    // the chart picks up the new theme tokens. Order matters: re-evaluating
+    // overrides BEFORE the chart's own theme-change handler ensures the chart
+    // reads the now-correct CSS variables when it rebuilds.
+    window.dispatchEvent(new CustomEvent("tm-colormode-change", { detail: { colorMode } }));
     window.dispatchEvent(new CustomEvent("tm-theme-change", { detail: { colorMode } }));
   }, [colorMode]);
 

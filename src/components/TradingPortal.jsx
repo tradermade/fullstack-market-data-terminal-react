@@ -5,9 +5,7 @@ import NavBar        from "./NavBar.jsx";
 import TopBar        from "./TopBar.jsx";
 import CandleChart   from "./CandleChart.jsx";
 import StatusBar     from "./StatusBar.jsx";
-import TickerPanel   from "./TickerPanel.jsx";
 import RightSidebar  from "./RightSidebar.jsx";
-import ChartCell     from "./ChartCell.jsx";
 import SettingsModal  from "./SettingsModal.jsx";
 import { MARKETS, TIMEFRAMES } from "../constants/constants.jsx";
 import { usePersistedState } from "../hooks/usePersistedState.js";
@@ -16,18 +14,33 @@ import { MAX_WINDOW_HOURS, DEFAULT_RANGE_HOURS } from "./TopBar.jsx";
 
 const MS_PER_HOUR = 3_600_000;
 const MARKET_LOOKBACK_STEP_MS = 15 * 60_000;
-const CACHE_VERSION = "v3";
+const EMPTY_WINDOW_BACKTRACK_ATTEMPTS = 5;
+const CACHE_VERSION = "v5";
+const FX_INTRADAY_MAX_HOURS = 48;
 
 /* ── Cache helpers ───────────────────────────────────────────────────────── */
 const getCacheKey = (sym, tfLabel, rangeHours, anchorKey = "live") =>
   `fx_cache_${CACHE_VERSION}_${sym}_${tfLabel}_${rangeHours}_${anchorKey}`;
+
+const isValidCandle = (bar) => (
+  bar &&
+  Number.isFinite(bar.t) &&
+  ["o", "h", "l", "c"].every((key) => Number.isFinite(bar[key]) && bar[key] > 0)
+);
 
 const getCachedTimeseries = (sym, tfLabel, rangeHours, anchorKey) => {
   try {
     const raw = sessionStorage.getItem(getCacheKey(sym, tfLabel, rangeHours, anchorKey));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed.data) && typeof parsed.lastFetch === "number") return parsed;
+    if (
+      Array.isArray(parsed.data) &&
+      parsed.data.length > 0 &&
+      parsed.data.every(isValidCandle) &&
+      typeof parsed.lastFetch === "number"
+    ) {
+      return parsed;
+    }
   } catch { /* ignore */ }
   return null;
 };
@@ -74,20 +87,33 @@ function saveStoredRange(tfObj, hours) {
   }
 }
 
-function clampRangeForTimeframe(tfObj, hours) {
-  const max = MAX_WINDOW_HOURS[tfObj.interval] ?? 48;
+function getMaxWindowHours(tfObj, marketId) {
+  if (marketId === "GLOBAL") {
+    if (tfObj.interval === "minute") {
+      return tfObj.period <= 5 ? 48 : 168;
+    }
+    if (tfObj.interval === "hourly") {
+      return tfObj.period === 1 ? 336 : 720;
+    }
+  }
+  return MAX_WINDOW_HOURS[tfObj.interval] ?? 48;
+}
+
+function clampRangeForTimeframe(tfObj, hours, marketId = "CRYPTO") {
+  const max = getMaxWindowHours(tfObj, marketId);
   const min = MIN_RANGE_HOURS[tfObj.interval] ?? 0;
   const fallback = DEFAULT_RANGE_HOURS[tfObj.interval] ?? max;
   const clamped = Math.min(hours, max);
   return min > 0 && clamped < min ? Math.min(fallback, max) : clamped;
 }
 
-function pickTimeframeForRange(currentTf, hours) {
+function pickTimeframeForRange(currentTf, hours, marketId) {
+  const currentMax = getMaxWindowHours(currentTf, marketId);
   const currentCandles = hours / timeframeHours(currentTf);
-  if (currentCandles >= MIN_CANDLES_PER_WINDOW) return currentTf;
+  if (hours <= currentMax && currentCandles >= MIN_CANDLES_PER_WINDOW) return currentTf;
 
   const candidates = TIMEFRAMES.filter((candidate) => {
-    const max = MAX_WINDOW_HOURS[candidate.interval] ?? 48;
+    const max = getMaxWindowHours(candidate, marketId);
     return hours <= max && hours / timeframeHours(candidate) >= MIN_CANDLES_PER_WINDOW;
   });
 
@@ -153,6 +179,17 @@ function candleStartMs(timestampMs, tf) {
   return Date.UTC(year, month, day, hour, Math.floor(minute / tf.period) * tf.period, 0, 0);
 }
 
+function candleFromTick(tick, tf) {
+  const price = tickPrice(tick);
+  if (price == null) return null;
+
+  const bucketStart = candleStartMs(tickTimestampMs(tick), tf);
+  const currentBucketStart = candleStartMs(Date.now(), tf);
+  if (bucketStart > currentBucketStart) return null;
+
+  return { t: bucketStart, o: price, h: price, l: price, c: price };
+}
+
 function isMarketOpenAt(timestampMs, marketId) {
   if (marketId === "CRYPTO") return true;
 
@@ -198,6 +235,94 @@ function getFetchStart(end, hours, marketId) {
   return new Date(end.getTime() - hours * MS_PER_HOUR);
 }
 
+function getFetchEnd(end, marketId) {
+  if (marketId === "CRYPTO" || isMarketOpenAt(end.getTime(), marketId)) {
+    return end;
+  }
+
+  let cursor = end.getTime();
+  const maxSteps = 7 * 24 * 60;
+  for (let step = 0; step < maxSteps; step += 1) {
+    cursor -= 60_000;
+    if (isMarketOpenAt(cursor, marketId)) {
+      return new Date(cursor);
+    }
+  }
+
+  return end;
+}
+
+function normalizeSymbol(value) {
+  return typeof value === "string" ? value.trim().toUpperCase() : "";
+}
+
+function findMarketSymbol(value) {
+  const symbol = normalizeSymbol(value);
+  if (!symbol) return null;
+
+  for (const market of MARKETS) {
+    const found = market.symbols.find((item) => item.sym === symbol || item.wsSym === symbol);
+    if (found) return { market, symbol: found };
+  }
+  return null;
+}
+
+function parseQuoteTimestampMs(value) {
+  if (value == null) return null;
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  }
+
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) {
+    return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+  }
+
+  const normalized = raw.includes("T")
+    ? raw
+    : /^\d{4}-\d{2}-\d{2}$/.test(raw)
+      ? `${raw}T00:00:00Z`
+      : raw.replace(/^(\d{4}-\d{2}-\d{2})[-\s](\d{2}:\d{2})(?::\d{2})?$/, "$1T$2:00Z");
+
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseQuotes(quotes) {
+  return quotes
+    .map((q) => {
+      const t = parseQuoteTimestampMs(q.date ?? q.timestamp ?? q.time);
+      let o = Number(q.open);
+      const h = Number(q.high);
+      const l = Number(q.low);
+      const c = Number(q.close);
+      if (!Number.isFinite(o) || o <= 0) {
+        o = [c, h, l].find((value) => Number.isFinite(value) && value > 0);
+      }
+      if (![t, o, h, l, c].every(Number.isFinite)) return null;
+      if ([o, h, l, c].some((value) => value <= 0)) return null;
+      return { t, o, h, l, c };
+    })
+    .filter(Boolean);
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  const json = await res.json();
+
+  if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+  if (json.error) throw new Error(json.error);
+  if (!Array.isArray(json.quotes)) throw new Error("No quotes returned from API");
+
+  return json;
+}
+
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
 export default function TradingPortal() {
   const chartRef = useRef(null);
@@ -210,44 +335,56 @@ export default function TradingPortal() {
     "fx_market", "GLOBAL",
     (v) => validMarketIds.includes(v)
   );
-  const activeMarket = MARKETS.find(m => m.id === activeMarketId);
+  const storedMarket = MARKETS.find(m => m.id === activeMarketId) ?? MARKETS[0];
 
   // Initialise symbol from ?symbol= URL param if present
-  const urlSymbol = searchParams.get("symbol");
+  const urlSymbol = normalizeSymbol(searchParams.get("symbol"));
   const [activeSymSym, setActiveSymSym] = usePersistedState(
     "fx_symbol",
     "EURUSD",
     (v) => typeof v === "string" && v.length > 0
   );
 
-  // Sync URL param when symbol is set from URL on first load or refresh
+  // Read URL param ONCE on mount and copy into state. After that, state is
+  // the source of truth and the URL is just a reflection of state (updated
+  // by handleMarketChange / setActiveSym). This eliminates the race condition
+  // where clicking a tab made state update faster than URL, then the URL
+  // would arrive a tick later and overwrite the user's choice.
+  const didInitFromUrlRef = useRef(false);
   useEffect(() => {
-    if (urlSymbol && urlSymbol !== activeSymSym) {
-      setActiveSymSym(urlSymbol);
+    if (didInitFromUrlRef.current) return;
+    didInitFromUrlRef.current = true;
+    const resolvedUrl = findMarketSymbol(urlSymbol);
+    if (resolvedUrl && resolvedUrl.symbol.sym !== activeSymSym) {
+      setActiveSymSym(resolvedUrl.symbol.sym);
     }
-  }, [urlSymbol, activeSymSym, setActiveSymSym]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Resolve stored sym string back to the full symbol object (may be in any market)
-  const activeSym = (() => {
-    for (const m of MARKETS) {
-      const found = m.symbols.find(s => s.sym === activeSymSym);
-      if (found) return found;
+  // STATE is the source of truth now — resolve the active symbol/market from
+  // activeSymSym (which click handlers update directly).
+  const resolvedActive = findMarketSymbol(activeSymSym);
+  const activeMarket = resolvedActive?.market ?? storedMarket;
+  const activeSym = resolvedActive?.symbol ?? activeMarket.symbols[0];
+
+  // Keep activeMarketId in sync with the actual market the symbol belongs to.
+  useEffect(() => {
+    if (activeMarket.id !== activeMarketId) {
+      setActiveMarketId(activeMarket.id);
     }
-    if (urlSymbol) {
-      for (const m of MARKETS) {
-        const found = m.symbols.find(s => s.sym === urlSymbol);
-        if (found) return found;
-      }
-    }
-    return activeMarket.symbols[0];
-  })();
+  }, [activeMarket.id, activeMarketId, setActiveMarketId]);
+
   const liveSymbols = useMemo(
     () => activeSym.wsSym ? [activeSym.sym, activeSym.wsSym] : [activeSym.sym],
     [activeSym.sym, activeSym.wsSym]
   );
-  const { ticks: liveTicks, ladders: liveLadders, hasLadder } = useSharedMarketData(liveSymbols);
+  const { ticks: liveTicks } = useSharedMarketData(liveSymbols);
   const liveTick = liveTicks[activeSym.sym];
-  const liveLadder = liveLadders?.[activeSym.sym];
+  const liveTickRef = useRef(null);
+
+  useEffect(() => {
+    liveTickRef.current = liveTick;
+  }, [liveTick]);
 
   const setActiveSym = (symObj) => {
     setActiveSymSym(symObj.sym);
@@ -265,16 +402,6 @@ export default function TradingPortal() {
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(null);
   const [tickerOpen, setTickerOpen] = useState(false);
-  // DOM / Heatmap user toggles (persisted)
-  const [domEnabled, setDomEnabled] = usePersistedState("fx_dom_enabled", true, v => typeof v === "boolean");
-  const [heatmapEnabled, setHeatmapEnabled] = usePersistedState("fx_heatmap_enabled", true, v => typeof v === "boolean");
-  // Multi-chart layout: "1x1" | "2x1" | "1x2" | "2x2"
-  const [layoutMode, setLayoutMode] = usePersistedState(
-    "fx_layout_mode", "1x1",
-    v => ["1x1", "2x1", "1x2", "2x2"].includes(v)
-  );
-  // Which slot is "focused" in multi-chart — its mini toolbar shows in main TopBar
-  const [focusedSlot, setFocusedSlot] = useState(0);
   // Settings modal open/close
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -282,8 +409,8 @@ export default function TradingPortal() {
   // Key format: "fx_range_hours_<tfLabel>" e.g. "fx_range_hours_1H"
   const [rangeHours, setRangeHours] = usePersistedState(
     getRangeKey(tfLabel),
-    clampRangeForTimeframe(tf, DEFAULT_RANGE_HOURS[tf.interval] ?? 24),
-    (v) => typeof v === "number" && v > 0 && v <= (MAX_WINDOW_HOURS[tf.interval] ?? 48)
+    clampRangeForTimeframe(tf, DEFAULT_RANGE_HOURS[tf.interval] ?? 24, activeMarket.id),
+    (v) => typeof v === "number" && v > 0 && v <= getMaxWindowHours(tf, activeMarket.id)
   );
 
   // anchorEnd: null = live (end = now), otherwise a timestamp (ms)
@@ -298,14 +425,17 @@ export default function TradingPortal() {
   // When market changes reset to first symbol
   const handleMarketChange = (marketId) => {
     const market = MARKETS.find(m => m.id === marketId);
+    if (!market) return;
+    const nextSymbol = market.symbols[0].sym;
     setActiveMarketId(marketId);
-    setActiveSymSym(market.symbols[0].sym);
+    setActiveSymSym(nextSymbol);
+    setSearchParams({ symbol: nextSymbol }, { replace: true });
   };
 
   // When TF changes: keep the persisted range for that specific TF.
   // If it's a new TF (never been selected), it will auto-load its default.
   const handleTfChange = (newTf) => {
-    const nextRange = clampRangeForTimeframe(newTf, readStoredRange(newTf));
+    const nextRange = clampRangeForTimeframe(newTf, readStoredRange(newTf), activeMarket.id);
     saveStoredRange(newTf, nextRange);
     setTf(newTf);
     setRangeHours(nextRange);
@@ -313,23 +443,43 @@ export default function TradingPortal() {
 
   // When range changes: also clamp to API max
   const handleRangeChange = (hours) => {
-    const nextTf = pickTimeframeForRange(tf, hours);
-    const nextRange = clampRangeForTimeframe(nextTf, hours);
+    const nextTf = pickTimeframeForRange(tf, hours, activeMarket.id);
+    const nextRange = clampRangeForTimeframe(nextTf, hours, activeMarket.id);
     saveStoredRange(nextTf, nextRange);
     if (nextTf.label !== tf.label) setTf(nextTf);
     setRangeHours(nextRange);
   };
 
+  useEffect(() => {
+    const max = getMaxWindowHours(tf, activeMarket.id);
+    if (rangeHours <= max) return;
+
+    const nextTf = pickTimeframeForRange(tf, rangeHours, activeMarket.id);
+    const nextRange = clampRangeForTimeframe(nextTf, rangeHours, activeMarket.id);
+    saveStoredRange(nextTf, nextRange);
+    if (nextTf.label !== tf.label) {
+      setTf(nextTf);
+    }
+    setRangeHours(nextRange);
+  }, [activeMarket.id, tf, rangeHours]);
+
 
 
   /* ── Parse API quotes to chart bar objects ───────────────────────────── */
-  const parseQuotes = (quotes) => quotes.map((q) => ({
-    t: new Date(q.date.replace(/(\d{4}-\d{2}-\d{2})[-\s](\d{2}:\d{2})(?::\d{2})?/, "$1T$2:00Z")).getTime(),
-    o: Number(q.open),
-    h: Number(q.high),
-    l: Number(q.low),
-    c: Number(q.close),
-  }));
+  // Track which symbol chartData belongs to — used to gate the chart render
+  // so we never display data that doesn't match the current symbol prop.
+  const [chartDataSymbol, setChartDataSymbol] = useState(null);
+  const [chartReady, setChartReady] = useState(false);
+
+  // Wipe stale candles when the chart identity changes so timeframe/range
+  // switches show the loader instead of rendering the previous dataset.
+  useEffect(() => {
+    setChartData([]);
+    setChartDataSymbol(null);
+    setChartReady(false);
+    setLoading(true);
+    setError(null);
+  }, [activeSym.sym, tf.label, rangeHours, anchorEndMs]);
 
   /* ── Full fetch (initial load / key change) ──────────────────────────── */
   useEffect(() => {
@@ -345,7 +495,12 @@ export default function TradingPortal() {
 
       const cached = getCachedTimeseries(activeSym.sym, tf.label, rangeHours, anchorKey);
       if (cached && (Date.now() - cached.lastFetch) < cacheTTL) {
-        if (!cancelled) { setChartData(cached.data); setLoading(false); }
+        if (!cancelled) {
+          setChartReady(false);
+          setChartData(cached.data);
+          setChartDataSymbol(activeSym.sym);
+          setLoading(false);
+        }
         return;
       }
 
@@ -357,42 +512,61 @@ export default function TradingPortal() {
         const isCrypto   = activeMarket.id === "CRYPTO";
         const now        = new Date();
 
-        const maxH = MAX_WINDOW_HOURS[tf.interval] ?? 48;
+        const maxH = getMaxWindowHours(tf, activeMarket.id);
         const clampedRange = Math.min(rangeHours, maxH);
+        const canBacktrackEmptyWindow = !isCrypto && clampedRange <= FX_INTRADAY_MAX_HOURS;
 
-        let end   = anchorEnd ? new Date(anchorEnd.getTime()) : new Date(now.getTime());
-        if (end > now) end = new Date(now.getTime());
-        const start = getFetchStart(end, clampedRange, activeMarket.id);
+        const weekendParam = isCrypto ? "&weekend=true" : "";
 
-        const weekendParam = isCrypto ? "&weekend=true"
-                           : tf.interval !== "daily" ? "&weekend=false"
-                           : "";
-
-        const url =
+        const buildUrl = (start, end) => (
           `/api/timeseries` +
           `?currency=${activeSym.sym}` +
           `&start_date=${formatTMDate(start, isIntraday)}` +
           `&end_date=${formatTMDate(end, isIntraday)}` +
           `&interval=${tf.interval}&period=${tf.period}` +
-          `&format=records${weekendParam}`;
+          `&format=records${weekendParam}`
+        );
 
-        const res  = await fetch(url);
-        const json = await res.json();
+        let end = anchorEnd ? new Date(anchorEnd.getTime()) : new Date(now.getTime());
+        if (end > now) end = new Date(now.getTime());
+        end = getFetchEnd(end, activeMarket.id);
+        let start = getFetchStart(end, clampedRange, activeMarket.id);
+        let newData = [];
+        let lastEmptyError = "No valid quotes returned from API";
 
-        if (!res.ok)                     throw new Error(json?.error || `HTTP ${res.status}`);
-        if (json.error)                  throw new Error(json.error);
-        if (!Array.isArray(json.quotes)) throw new Error("No quotes returned from API");
+        for (let attempt = 0; attempt <= EMPTY_WINDOW_BACKTRACK_ATTEMPTS; attempt += 1) {
+          const json = await fetchJson(buildUrl(start, end));
+          newData = parseQuotes(json.quotes);
+          if (newData.length > 0) break;
 
-        const newData = parseQuotes(json.quotes);
+          lastEmptyError = json.quotes.length === 0
+            ? "No quotes returned for requested window"
+            : "No valid quotes returned from API";
+
+          if (!canBacktrackEmptyWindow || attempt === EMPTY_WINDOW_BACKTRACK_ATTEMPTS) break;
+
+          end = getFetchEnd(new Date(start.getTime() - 60_000), activeMarket.id);
+          start = getFetchStart(end, clampedRange, activeMarket.id);
+        }
+
+        if (newData.length === 0) throw new Error(lastEmptyError);
 
         if (!cancelled) {
+          setChartReady(false);
           setChartData(newData);
-          setCachedTimeseries(activeSym.sym, tf.label, rangeHours, anchorKey, newData);
+          setChartDataSymbol(activeSym.sym);
+          setTimeout(() => {
+            if (!cancelled) {
+              setCachedTimeseries(activeSym.sym, tf.label, rangeHours, anchorKey, newData);
+            }
+          }, 0);
         }
       } catch (err) {
         if (!cancelled) {
           setError(err.message || "Failed to load chart data");
           setChartData([]);
+          setChartDataSymbol(null);
+          setChartReady(false);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -411,7 +585,7 @@ export default function TradingPortal() {
     const isCrypto = activeMarket.id === "CRYPTO";
     // Fetch last 2 periods to capture a forming bar + the bar before it
     const lookbackMs = tf.period * 2 * (tf.interval === "hourly" ? 3_600_000 : 60_000);
-    const weekendParam = isCrypto ? "&weekend=true" : "&weekend=false";
+    const weekendParam = isCrypto ? "&weekend=true" : "";
 
     const poll = async () => {
       try {
@@ -447,7 +621,10 @@ export default function TradingPortal() {
             }
           }
 
-          setCachedTimeseries(activeSym.sym, tf.label, rangeHours, "live", next);
+          setTimeout(() => {
+            setCachedTimeseries(activeSym.sym, tf.label, rangeHours, "live", next);
+          }, 0);
+
           return next;
         });
       } catch { /* silent - don't disrupt chart on poll failure */ }
@@ -478,14 +655,12 @@ export default function TradingPortal() {
     try {
       const isIntraday = tf.interval !== "daily";
       const isCrypto = activeMarket.id === "CRYPTO";
-      const maxH = MAX_WINDOW_HOURS[tf.interval] ?? 48;
+      const maxH = getMaxWindowHours(tf, activeMarket.id);
       // Fetch one full max-window worth of older data per request.
       const end = new Date(beforeTimestampMs - 1000); // 1s before the oldest candle
       const start = new Date(end.getTime() - maxH * MS_PER_HOUR);
 
-      const weekendParam = isCrypto ? "&weekend=true"
-                         : tf.interval !== "daily" ? "&weekend=false"
-                         : "";
+      const weekendParam = isCrypto ? "&weekend=true" : "";
       const url =
         `/api/timeseries` +
         `?currency=${activeSym.sym}` +
@@ -528,45 +703,48 @@ export default function TradingPortal() {
   };
 
   useEffect(() => {
-    if (anchorEnd || loading || error || !liveTick) return;
+    if (anchorEnd || !liveTick) return;
 
-    const price = tickPrice(liveTick);
-    if (price == null) return;
+    const tickCandle = candleFromTick(liveTick, tf);
+    if (!tickCandle) return;
 
-    const bucketStart = candleStartMs(tickTimestampMs(liveTick), tf);
-    const currentBucketStart = candleStartMs(Date.now(), tf);
-    if (bucketStart > currentBucketStart) return;
+    setError(null);
+    setLoading(false);
+    setChartDataSymbol(activeSym.sym);
 
     setChartData((prev) => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
 
       // Tick belongs to an already-closed bar (older bucket) → ignore.
-      if (bucketStart < last.t) return prev;
+      if (tickCandle.t < last.t) return prev;
 
       const next = [...prev];
-      if (bucketStart === last.t) {
+      if (tickCandle.t === last.t) {
         // Same forming bucket → always emit a new object so the chart re-renders
         // even when only the close moves by a single pip (tick crawl on illiquid pairs).
         const updated = {
           ...last,
-          h: Math.max(last.h, price),
-          l: Math.min(last.l, price),
-          c: price,
+          h: Math.max(last.h, tickCandle.c),
+          l: Math.min(last.l, tickCandle.c),
+          c: tickCandle.c,
         };
         next[next.length - 1] = updated;
         return next;
       }
 
       // New bucket has started — push a fresh candle.
-      next.push({ t: bucketStart, o: price, h: price, l: price, c: price });
+      next.push(tickCandle);
       return next;
     });
-  }, [anchorEnd, error, liveTick, loading, tf]);
+  }, [activeSym.sym, anchorEnd, liveTick, tf]);
 
   const last = chartData[chartData.length - 1] ?? null;
-  const blockingLoad = loading && chartData.length === 0;
-  const backgroundLoad = loading && chartData.length > 0;
+  const chartMounted = !error && chartData.length > 0 && chartDataSymbol === activeSym.sym;
+  const chartRenderPending = chartMounted && !chartReady;
+  const blockingLoad = (loading && chartData.length === 0) || chartRenderPending;
+  const backgroundLoad = loading && chartData.length > 0 && !chartRenderPending;
+  const chartIdentity = `${activeMarket.id}-${activeSym.sym}-${tf.label}-${rangeHours}-${anchorEndMs ?? "live"}`;
 
   return (
     <>
@@ -575,76 +753,27 @@ export default function TradingPortal() {
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg-base)]">
 
         {/* NavBar */}
-        <NavBar activeMarket={activeMarketId} onMarketChange={handleMarketChange} />
+        <NavBar activeMarket={activeMarket.id} onMarketChange={handleMarketChange} />
 
-        {/* TopBar — hidden in multi-chart mode (each cell has its own mini-toolbar) */}
-        {layoutMode === "1x1" && (
-          <TopBar
-            pairs={activeMarket.symbols}
-            timeframes={TIMEFRAMES}
-            activeSym={activeSym}
-            onSymChange={setActiveSym}
-            tf={tf}
-            onTfChange={handleTfChange}
-            lastCandle={last}
-            decimals={activeSym.decimals ?? 5}
-            chartRef={chartRef}
-            rangeHours={rangeHours}
-            onRangeChange={handleRangeChange}
-            anchorEnd={anchorEnd}
-            onAnchorChange={setAnchorEnd}
-            displayWindowStart={chartData[0] ? new Date(chartData[0].t) : null}
-          />
-        )}
-
-        {/* Layout selector — picks how many independent charts to show */}
-        <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--bg-panel)] px-4">
-          <span className="font-mono text-[9px] uppercase tracking-wider text-[var(--text-dim)]">
-            Layout
-          </span>
-          {[
-            { id: "1x1", label: "▢",   title: "Single chart" },
-            { id: "2x1", label: "◫",   title: "2 columns" },
-            { id: "1x2", label: "⊟",   title: "2 rows" },
-            { id: "2x2", label: "⊞",   title: "2x2 grid" },
-          ].map((opt) => {
-            const active = layoutMode === opt.id;
-            return (
-              <button
-                key={opt.id}
-                onClick={() => setLayoutMode(opt.id)}
-                title={opt.title}
-                className={`flex h-6 w-7 items-center justify-center rounded border font-mono text-[12px]
-                            transition-colors duration-150
-                            ${active
-                              ? "border-[var(--blue)] bg-[var(--blue)]/15 text-[var(--blue)]"
-                              : "border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-dim)] hover:text-[var(--text-secondary)]"}`}
-              >
-                {opt.label}
-              </button>
-            );
-          })}
-          {layoutMode !== "1x1" && (
-            <span className="ml-2 font-mono text-[9px] uppercase tracking-wider text-[var(--text-dim)]">
-              · Click a cell to focus, or single-chart mode for full toolbar
-            </span>
-          )}
-
-          {/* Settings (candle colors, theme) — pushed to the right */}
-          <button
-            onClick={() => setSettingsOpen(true)}
-            title="Chart settings · candle colors, theme"
-            className="ml-auto flex h-6 items-center gap-1.5 rounded border border-[var(--border)]
-                       bg-[var(--bg-card)] px-2 font-mono text-[9px] font-bold uppercase tracking-wider
-                       text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:border-[var(--blue)]"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-            Settings
-          </button>
-        </div>
+        {/* TopBar */}
+        <TopBar
+          pairs={activeMarket.symbols}
+          timeframes={TIMEFRAMES}
+          activeSym={activeSym}
+          onSymChange={setActiveSym}
+          tf={tf}
+          onTfChange={handleTfChange}
+          lastCandle={last}
+          decimals={activeSym.decimals ?? 5}
+          chartRef={chartRef}
+          rangeHours={rangeHours}
+          onRangeChange={handleRangeChange}
+          anchorEnd={anchorEnd}
+          onAnchorChange={setAnchorEnd}
+          displayWindowStart={chartData[0] ? new Date(chartData[0].t) : null}
+          maxRangeHours={getMaxWindowHours(tf, activeMarket.id)}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
 
         {/* Settings modal (candle colors, theme) */}
         <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
@@ -667,10 +796,11 @@ export default function TradingPortal() {
                     style={{ animation: "spin 0.7s linear infinite" }}
                   />
                   <span className="font-mono text-[11px] text-[var(--blue)]">
-                    {activeSym.sym} · {tf.label}
+                    {activeSym.sym} - {tf.label}
                   </span>
                 </div>
               )}
+
 
               {backgroundLoad && (
                 <div className="absolute left-1/2 top-4 z-50 flex -translate-x-1/2 items-center gap-2
@@ -693,71 +823,18 @@ export default function TradingPortal() {
                 </div>
               )}
 
-              {!error && chartData.length > 0 && layoutMode === "1x1" && (
+              {chartMounted && (
                 <div className="absolute inset-0">
                   <CandleChart
+                    key={chartIdentity}
                     ref={chartRef}
                     data={chartData}
-                    chartKey={`${activeSym.sym}-${tf.label}`}
+                    chartKey={chartIdentity}
                     symbol={activeSym.sym}
                     decimals={activeSym.decimals ?? 5}
+                    onReady={() => setChartReady(true)}
                     onLoadMoreHistory={loadMoreHistory}
-                    ladder={heatmapEnabled && hasLadder ? liveLadder : null}
                   />
-                </div>
-              )}
-
-              {/* Multi-chart grid (independent cells, each with own symbol/TF) */}
-              {layoutMode !== "1x1" && (
-                <div
-                  className="absolute inset-0 grid gap-1 bg-[var(--bg-base)] p-1"
-                  style={{
-                    gridTemplateColumns: layoutMode === "2x1" || layoutMode === "2x2" ? "1fr 1fr" : "1fr",
-                    gridTemplateRows:    layoutMode === "1x2" || layoutMode === "2x2" ? "1fr 1fr" : "1fr",
-                  }}
-                >
-                  {Array.from({
-                    length: layoutMode === "2x2" ? 4 : layoutMode === "1x1" ? 1 : 2,
-                  }).map((_, i) => (
-                    <ChartCell
-                      key={i}
-                      cellId={`slot${i}`}
-                      defaultSymbol={i === 0 ? "EURUSD" : i === 1 ? "GBPUSD" : i === 2 ? "USDJPY" : "AUDUSD"}
-                      defaultTfLabel={tf.label}
-                      defaultRangeHours={rangeHours}
-                      focused={focusedSlot === i}
-                      onFocus={() => setFocusedSlot(i)}
-                    />
-                  ))}
-                </div>
-              )}
-
-              {/* Ladder feature toggles — only visible when account has trader_ladder.
-                  Positioned to the left of the Highcharts hamburger/export menu. */}
-              {hasLadder && (
-                <div className="absolute right-12 top-3 z-40 flex items-center gap-1">
-                  <button
-                    onClick={() => setDomEnabled(v => !v)}
-                    title="Toggle Depth-of-Market panel"
-                    className={`rounded border px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-wider
-                                transition-colors duration-150
-                                ${domEnabled
-                                  ? "border-[var(--blue)] bg-[var(--blue)]/15 text-[var(--blue)]"
-                                  : "border-[var(--border)] bg-[var(--bg-card)]/95 text-[var(--text-dim)] hover:text-[var(--text-secondary)]"}`}
-                  >
-                    DOM {domEnabled ? "ON" : "OFF"}
-                  </button>
-                  <button
-                    onClick={() => setHeatmapEnabled(v => !v)}
-                    title="Toggle liquidity heatmap on chart"
-                    className={`rounded border px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-wider
-                                transition-colors duration-150
-                                ${heatmapEnabled
-                                  ? "border-[var(--blue)] bg-[var(--blue)]/15 text-[var(--blue)]"
-                                  : "border-[var(--border)] bg-[var(--bg-card)]/95 text-[var(--text-dim)] hover:text-[var(--text-secondary)]"}`}
-                  >
-                    Heatmap {heatmapEnabled ? "ON" : "OFF"}
-                  </button>
                 </div>
               )}
 
@@ -790,10 +867,8 @@ export default function TradingPortal() {
           >
             <div className="flex-1 overflow-hidden">
               <RightSidebar
-                activeMarketId={activeMarketId}
+                activeMarketId={activeMarket.id}
                 selectedSymbol={activeSym.sym}
-                selectedDecimals={activeSym.decimals ?? 5}
-                domEnabled={domEnabled && hasLadder}
               />
             </div>
           </div>

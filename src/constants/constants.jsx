@@ -1,5 +1,11 @@
+
 const FX_CODES = [
-  "AED","AOA","ARS","AUD","BGN","BHD","BRL","CAD","CHF","CLP","CNH","CNY","COP","CZK","DKK","EUR","GBP","HKD","HRK","HUF","IDR","ILS","INR","ISK","JPY","KRW","KWD","MAD","MXN","MYR","NGN","NOK","NZD","OMR","PEN","PHP","PLN","RON","RUB","SAR","SEK","SGD","THB","TRY","TWD","USD","VND","XAG","XAU","XPD","XPT","ZAR"
+  "AED","ALL","AMD","AOA","ARS","AUD","BAM","BDT","BGN","BHD","BIF","BRL","BYN",
+  "CAD","CHF","CLP","CNH","CNY","COP","CZK","DKK","EGP","EUR","GBP","GHS","HKD",
+  "HRK","HUF","IDR","ILS","INR","ISK","JOD","JPY","KES","KRW","KWD","KZT","LBP",
+  "LKR","MAD","MUR","MXN","MYR","NGN","NOK","NZD","OMR","PEN","PHP","PKR","PLN",
+  "QAR","RON","RUB","SAR","SEK","SGD","THB","TND","TRY","TWD","TZS","UAH","UGX",
+  "USD","VND","XAF","XOF","ZAR","ZWL"
 ];
 
 const fxDecimals = (base, quote) => {
@@ -19,40 +25,7 @@ export const GLOBAL_PAIRS = FX_CODES.flatMap((base) =>
     }))
 );
 
-export const AFRICAN_PAIRS = [
-  { sym: "USDKES",  base: "USD",  quote: "KES", decimals: 2 },
-  { sym: "USDTKES", base: "USDT", quote: "KES", decimals: 2 },
-  { sym: "USDUGX",  base: "USD",  quote: "UGX", decimals: 2 },
-  { sym: "USDTUGX", base: "USDT", quote: "UGX", decimals: 2 },
-  { sym: "USDTZS",  base: "USD",  quote: "TZS", decimals: 2 },
-  { sym: "USDTTZS", base: "USDT", quote: "TZS", decimals: 2 },
-  { sym: "USDNGN",  base: "USD",  quote: "NGN", decimals: 2 },
-  { sym: "USDTNGN", base: "USDT", quote: "NGN", decimals: 2 },
-  { sym: "USDGHS",  base: "USD",  quote: "GHS", decimals: 5 },
-  { sym: "USDTGHS", base: "USDT", quote: "GHS", decimals: 5 },
-  { sym: "USDXOF",  base: "USD",  quote: "XOF", decimals: 2 },
-  { sym: "USDTXOF", base: "USDT", quote: "XOF", decimals: 2 },
-  { sym: "USDXAF",  base: "USD",  quote: "XAF", decimals: 2 },
-  { sym: "USDTXAF", base: "USDT", quote: "XAF", decimals: 2 },
-  { sym: "USDZAR",  base: "USD",  quote: "ZAR", decimals: 5 },
-  { sym: "USDTZAR", base: "USDT", quote: "ZAR", decimals: 5 },
-  { sym: "USDZMW",  base: "USD",  quote: "ZMW", decimals: 5 },
-  { sym: "USDTZMW", base: "USDT", quote: "ZMW", decimals: 5 },
-  { sym: "USDMWK",  base: "USD",  quote: "MWK", decimals: 2 },
-  { sym: "USDTMWK", base: "USDT", quote: "MWK", decimals: 2 },
-  { sym: "USDMZN",  base: "USD",  quote: "MZN", decimals: 5 },
-  { sym: "USDTMZN", base: "USDT", quote: "MZN", decimals: 5 },
-  { sym: "USDBWP",  base: "USD",  quote: "BWP", decimals: 5 },
-  { sym: "USDTBWP", base: "USDT", quote: "BWP", decimals: 5 },
-  { sym: "USDEGP",  base: "USD",  quote: "EGP", decimals: 5 },
-  { sym: "USDTEGP", base: "USDT", quote: "EGP", decimals: 5 },
-  { sym: "USDETB",  base: "USD",  quote: "ETB", decimals: 5 },
-  { sym: "USDTETB", base: "USDT", quote: "ETB", decimals: 5 },
-  { sym: "USDTND",  base: "USD",  quote: "TND", decimals: 5 },
-  { sym: "USDTTND", base: "USDT", quote: "TND", decimals: 5 },
-];
-
-export const CURRENCY_PAIRS = [...GLOBAL_PAIRS, ...AFRICAN_PAIRS];
+export const CURRENCY_PAIRS = [...GLOBAL_PAIRS];
 
 export const METALS_CFD = [
   { sym: "XAUUSD", base: "XAU", quote: "USD", name: "Gold / US Dollar", decimals: 2 },
@@ -60,6 +33,7 @@ export const METALS_CFD = [
   { sym: "XAUEUR", base: "XAU", quote: "EUR", name: "Gold / Euro", decimals: 2 },
   { sym: "XAGEUR", base: "XAG", quote: "EUR", name: "Silver / Euro", decimals: 3 },
   { sym: "XPTUSD", base: "XPT", quote: "USD", name: "Platinum / US Dollar", decimals: 2 },
+  { sym: "XPDUSD", base: "XPD", quote: "USD", name: "Palladium / US Dollar", decimals: 2 },
   { sym: "COPPER", base: "COPPER", quote: "CFD", name: "Copper", decimals: 3 },
 ];
 
@@ -70,15 +44,16 @@ export const ENERGIES_CFD = [
 ];
 
 export const INDICES_CFD = [
-  { sym: "UK100", base: "UK", quote: "100", name: "UK100", decimals: 1 },
-  { sym: "GER30", base: "GER", quote: "30", name: "GER30", decimals: 1 },
-  { sym: "SPX500", base: "SPX", quote: "500", name: "SPX500", decimals: 1 },
-  { sym: "FRA40", base: "FRA", quote: "40", name: "FRA40", decimals: 1 },
-  { sym: "JPN225", base: "JPN", quote: "225", name: "JPN225", decimals: 1 },
-  { sym: "NAS100", base: "NAS", quote: "100", name: "NAS100", decimals: 1 },
-  { sym: "USA30", base: "USA", quote: "30", name: "USA30", decimals: 1 },
-  { sym: "HKG33", base: "HKG", quote: "33", name: "HKG33", decimals: 1 },
-  { sym: "AUS200", base: "AUS", quote: "200", name: "ASX200", decimals: 1 },
+  { sym: "UK100", base: "UK", quote: "100", name: "UK100 / FTSE 100", decimals: 1 },
+  { sym: "GER30", base: "GER", quote: "30", name: "DAX 30", decimals: 1 },
+  { sym: "SPX500", base: "SPX", quote: "500", name: "S&P 500", decimals: 1 },
+  { sym: "FRA40", base: "FRA", quote: "40", name: "CAC 40", decimals: 1 },
+  { sym: "ESP35", base: "ESP", quote: "35", name: "IBEX 35", decimals: 1 },
+  { sym: "JPN225", base: "JPN", quote: "225", name: "Nikkei 225", decimals: 1 },
+  { sym: "NAS100", base: "NAS", quote: "100", name: "Nasdaq 100", decimals: 1 },
+  { sym: "USA30", base: "USA", quote: "30", name: "Dow Jones 30", decimals: 1 },
+  { sym: "HKG33", base: "HKG", quote: "33", name: "Hang Seng", decimals: 1 },
+  { sym: "AUS200", base: "AUS", quote: "200", name: "ASX 200", decimals: 1 },
 ];
 
 export const US_STOCKS = [
@@ -103,6 +78,7 @@ export const US_STOCKS = [
   { sym: "AZN", wsSym: "AZNUSD", base: "AZN", quote: "USD", name: "Astrazeneca", decimals: 2 },
   { sym: "META", wsSym: "METAUSD", base: "META", quote: "USD", name: "Meta Platforms", decimals: 2 },
   { sym: "FB", wsSym: "FBUSD", base: "FB", quote: "USD", name: "Facebook", decimals: 2 },
+  { sym: "TWTR", wsSym: "TWTRUSD", base: "TWTR", quote: "USD", name: "Twitter", decimals: 2 },
 ];
 
 export const CRYPTO_PAIRS = [
@@ -155,6 +131,14 @@ export const CRYPTO_PAIRS = [
   { sym: "WBTCBTC", base: "WBTC", quote: "BTC", name: "Wrapped Bitcoin / Bitcoin", decimals: 6 },
   { sym: "ALGOUSD", base: "ALGO", quote: "USD", name: "Algorand", decimals: 5 },
   { sym: "USDCUSD", base: "USDC", quote: "USD", name: "USD Coin", decimals: 5 },
+  { sym: "BTGUSD",  base: "BTG",  quote: "USD", name: "Bitcoin Gold", decimals: 3 },
+  { sym: "BUSDUSD", base: "BUSD", quote: "USD", name: "Binance USD", decimals: 5 },
+  { sym: "FTMUSD",  base: "FTM",  quote: "USD", name: "Fantom", decimals: 5 },
+  { sym: "FTTUSD",  base: "FTT",  quote: "USD", name: "FTX Token", decimals: 4 },
+  { sym: "HNTUSD",  base: "HNT",  quote: "USD", name: "Helium", decimals: 4 },
+  { sym: "LUNAUSD", base: "LUNA", quote: "USD", name: "Luna", decimals: 4 },
+  { sym: "POLUSD",  base: "POL",  quote: "USD", name: "Polygon", decimals: 5 },
+  { sym: "XMRUSD",  base: "XMR",  quote: "USD", name: "Monero", decimals: 2 },
 ];
 
 export const MARKETS = [

@@ -5,7 +5,7 @@ const MS_PER_HOUR = 3_600_000;
 const MAX_CUSTOM_RANGE_HOURS = 8_760;
 
 export const MAX_WINDOW_HOURS = {
-  minute: 48,
+  minute: 720,
   hourly: 720,
   daily: 8_760,
 };
@@ -26,7 +26,12 @@ export const DEFAULT_RANGE_HOURS = {
   daily: 4_380,
 };
 
+function isValidDate(date) {
+  return date instanceof Date && Number.isFinite(date.getTime());
+}
+
 function toDateInputValue(date) {
+  if (!isValidDate(date)) return "";
   const y = date.getUTCFullYear();
   const mo = String(date.getUTCMonth() + 1).padStart(2, "0");
   const da = String(date.getUTCDate()).padStart(2, "0");
@@ -34,12 +39,14 @@ function toDateInputValue(date) {
 }
 
 function toTimeInputValue(date) {
+  if (!isValidDate(date)) return "00:00";
   const h = String(date.getUTCHours()).padStart(2, "0");
   const mi = String(date.getUTCMinutes()).padStart(2, "0");
   return `${h}:${mi}`;
 }
 
 function formatDisplayDate(date) {
+  if (!isValidDate(date)) return "-- -- ----";
   const da = String(date.getUTCDate()).padStart(2, "0");
   const mo = String(date.getUTCMonth() + 1).padStart(2, "0");
   const y = date.getUTCFullYear();
@@ -70,6 +77,7 @@ function toUtcDate(value) {
 }
 
 function getMonthStart(date) {
+  if (!isValidDate(date)) return getMonthStart(new Date());
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }
 
@@ -145,11 +153,14 @@ export default function TopBar({
   anchorEnd,
   onAnchorChange,
   displayWindowStart = null,
+  maxRangeHours = null,
+  onOpenSettings = null,
 }) {
   const isLive = anchorEnd === null;
-  const maxHours = MAX_WINDOW_HOURS[tf.interval] ?? 48;
+  const maxHours = maxRangeHours ?? MAX_WINDOW_HOURS[tf.interval] ?? 48;
   const effectiveRangeHours = Math.min(rangeHours, maxHours);
-  const windowStart = displayWindowStart ?? getWindowStartDate(anchorEnd, effectiveRangeHours);
+  const fallbackWindowStart = getWindowStartDate(anchorEnd, effectiveRangeHours);
+  const windowStart = isValidDate(displayWindowStart) ? displayWindowStart : fallbackWindowStart;
   const maxWindowStart = getWindowStartDate(null, effectiveRangeHours);
 
   const shift = (dir) => {
@@ -172,25 +183,27 @@ export default function TopBar({
 
   return (
     <div className="flex h-14 shrink-0 items-center justify-between gap-3 overflow-x-auto overflow-y-hidden
-                    border-b border-[var(--border)] bg-[var(--bg-panel)] px-4
+                    border-b border-[var(--border)] bg-[var(--bg-panel)] px-5
                     [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2.5">
         <SymbolDropdown pairs={pairs} activeSym={activeSym} onSymChange={onSymChange} />
 
         <Sep />
 
-        <div className="flex shrink-0 gap-0.5 rounded-md bg-[var(--bg-card)] p-1 border border-[var(--border)]">
+        {/* Timeframe pill — all buttons 32px tall, evenly sized */}
+        <div className="flex h-8 shrink-0 items-center gap-px rounded-md border border-[var(--border)] bg-[var(--bg-card)] p-0.5">
           {timeframes.map((t) => {
             const active = tf.label === t.label;
             return (
               <button
                 key={t.label}
                 onClick={() => onTfChange(t)}
-                className={`w-14 rounded-sm py-2 text-xs font-semibold tracking-wide text-center
-                           transition-colors duration-150 [font-family:var(--font-display)]
+                className={`group h-7 min-w-[3.5rem] rounded px-2 text-[11px] font-bold tracking-wide
+                           transition-all duration-150 [font-family:var(--font-display)]
+                           focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]
                            ${active
-                             ? "bg-[var(--blue)] text-white"
-                             : "bg-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                             ? "bg-[var(--blue)] text-white shadow-sm"
+                             : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                            }`}
               >
                 {t.label}
@@ -201,7 +214,8 @@ export default function TopBar({
 
         <Sep />
 
-        <div className="flex shrink-0 gap-1 rounded-md bg-[var(--bg-card)] p-1 border border-[var(--border)]">
+        {/* Range pill — same height as timeframe, slightly narrower buttons */}
+        <div className="flex h-8 shrink-0 items-center gap-px rounded-md border border-[var(--border)] bg-[var(--bg-card)] p-0.5">
           {RANGE_PRESETS.map((r) => {
             const active = rangeHours === r.hours;
             const disabled = r.hours > maxHours;
@@ -210,13 +224,15 @@ export default function TopBar({
                 key={r.label}
                 onClick={() => !disabled && onRangeChange(r.hours)}
                 title={disabled ? `Max ${maxHours}h for ${tf.label} interval` : r.label}
-                className={`w-9 py-2 rounded-sm text-xs font-semibold tracking-wide text-center
-                           transition-colors duration-150 [font-family:var(--font-display)]
+                disabled={disabled}
+                className={`h-7 min-w-[2.5rem] rounded px-1.5 text-[11px] font-bold tracking-wide
+                           transition-all duration-150 [font-family:var(--font-display)]
+                           focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]
                            ${disabled
                              ? "opacity-25 cursor-not-allowed text-[var(--text-dim)]"
                              : active
-                               ? "bg-[var(--blue)] text-white"
-                               : "bg-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                               ? "bg-[var(--blue)] text-white shadow-sm"
+                               : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                            }`}
               >
                 {r.label}
@@ -227,7 +243,8 @@ export default function TopBar({
 
         <Sep />
 
-        <div className="flex shrink-0 items-center gap-1">
+        {/* Date nav group — arrows + picker + Live, all 32px tall */}
+        <div className="flex h-8 shrink-0 items-center gap-1">
           <NavArrow dir={-1} onClick={() => shift(-1)} />
 
           <DateRangePicker
@@ -243,43 +260,67 @@ export default function TopBar({
 
           <button
             onClick={() => onAnchorChange(null)}
-            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-sm text-[11px] font-semibold
-                       border transition-colors duration-150 [font-family:var(--font-display)]
+            disabled={isLive}
+            className={`flex h-8 items-center gap-1.5 rounded-md px-3 text-[11px] font-bold tracking-wide
+                       border transition-all duration-150 [font-family:var(--font-display)]
+                       focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]
                        ${isLive
-                         ? "bg-[var(--green)]/15 border-[var(--green)]/40 text-[var(--green)]"
-                         : "bg-[var(--bg-card)] border-[var(--border-bright)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                         ? "bg-[var(--green)]/15 border-[var(--green)]/40 text-[var(--green)] cursor-default"
+                         : "bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] hover:border-[var(--border-bright)]"
                        }`}
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${isLive ? "bg-[var(--green)]" : "bg-[var(--text-dim)]"}`}
-              style={isLive ? { animation: "pulse 2s infinite" } : {}}
+              style={isLive ? { animation: "pulse-dot 1.6s ease infinite" } : {}}
             />
-            Live
+            LIVE
           </button>
         </div>
 
         <Sep />
 
-        <button
-          onClick={handleSave}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-sm text-[11px] font-semibold bg-[var(--bg-card)]
-                   border border-[var(--border-bright)] text-[var(--text-secondary)]
-                   hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]
-                   transition-colors duration-150 [font-family:var(--font-display)]"
-        >
-          <SaveIcon />
-          Save
-        </button>
-        <button
-          onClick={() => chartRef.current?.resetZoom?.()}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-sm text-[11px] font-semibold bg-[var(--bg-card)]
-                   border border-[var(--border-bright)] text-[var(--text-secondary)]
-                   hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]
-                   transition-colors duration-150 [font-family:var(--font-display)]"
-        >
-          <SearchIcon />
-          Reset
-        </button>
+        {/* Chart actions group — Save / Reset / Settings grouped as one pill */}
+        <div className="flex h-8 shrink-0 items-center gap-px rounded-md border border-[var(--border)] bg-[var(--bg-card)] p-0.5">
+          <button
+            onClick={handleSave}
+            title="Save chart drawings and indicators"
+            className="flex h-7 items-center gap-1.5 rounded px-2.5 text-[11px] font-bold tracking-wide
+                     text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]
+                     transition-all duration-150 [font-family:var(--font-display)]
+                     focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]"
+          >
+            <SaveIcon />
+            <span className="hidden lg:inline">Save</span>
+          </button>
+          <span className="h-4 w-px bg-[var(--border)]" />
+          <button
+            onClick={() => chartRef.current?.resetZoom?.()}
+            title="Reset chart zoom"
+            className="flex h-7 items-center gap-1.5 rounded px-2.5 text-[11px] font-bold tracking-wide
+                     text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]
+                     transition-all duration-150 [font-family:var(--font-display)]
+                     focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]"
+          >
+            <ResetIcon />
+            <span className="hidden lg:inline">Reset</span>
+          </button>
+          {onOpenSettings && (
+            <>
+              <span className="h-4 w-px bg-[var(--border)]" />
+              <button
+                onClick={onOpenSettings}
+                title="Chart settings · candle colors, theme"
+                className="flex h-7 items-center gap-1.5 rounded px-2.5 text-[11px] font-bold tracking-wide
+                         text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]
+                         transition-all duration-150 [font-family:var(--font-display)]
+                         focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]"
+              >
+                <SettingsIcon />
+                <span className="hidden lg:inline">Settings</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {lastCandle && (
@@ -438,10 +479,14 @@ function DateRangePicker({
         ref={triggerRef}
         type="button"
         onClick={toggleOpen}
-        className={`flex h-7 min-w-[128px] items-center justify-between gap-2 rounded-sm border px-2
-                   bg-[var(--bg-card)] text-[11px] font-semibold text-[var(--text-primary)]
-                   transition-colors duration-150 [font-family:var(--font-display)]
-                   ${open ? "border-[var(--blue)]" : "border-[var(--border-bright)] hover:border-[var(--blue)] hover:bg-[var(--bg-hover)]"}`}
+        className={`flex h-8 min-w-[140px] items-center justify-between gap-2 rounded-md border px-3
+                   bg-[var(--bg-card)] text-[11px] font-bold text-[var(--text-primary)]
+                   transition-all duration-150 [font-family:var(--font-display)]
+                   focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]
+                   ${open
+                     ? "border-[var(--blue)] bg-[var(--bg-hover)]"
+                     : "border-[var(--border)] hover:border-[var(--border-bright)] hover:bg-[var(--bg-hover)]"
+                   }`}
       >
         <span className="flex items-center gap-1.5">
           <CalendarIcon />
@@ -814,7 +859,8 @@ function ClockIcon() {
 }
 
 function Sep() {
-  return <div className="h-4 w-px shrink-0 bg-[var(--border)]" />;
+  // Softer separator — fits visually between the now-bigger pill groups
+  return <div className="h-5 w-px shrink-0 bg-[var(--border)]/60" />;
 }
 
 function NavArrow({ dir, onClick, disabled }) {
@@ -823,11 +869,13 @@ function NavArrow({ dir, onClick, disabled }) {
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-7 w-7 items-center justify-center rounded-sm border text-[11px]
-                 transition-colors duration-150
+      title={dir < 0 ? "Step back" : "Step forward"}
+      className={`flex h-8 w-8 items-center justify-center rounded-md border
+                 transition-all duration-150
+                 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]
                  ${disabled
                    ? "opacity-25 cursor-not-allowed border-[var(--border)] text-[var(--text-dim)]"
-                   : "bg-[var(--bg-card)] border-[var(--border-bright)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                   : "bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] hover:border-[var(--border-bright)]"
                  }`}
     >
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -845,9 +893,9 @@ function NavArrow({ dir, onClick, disabled }) {
 
 function OHLCItem({ label, value, color, bold }) {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-[var(--text-dim)] font-semibold">{label}</span>
-      <span className={`${color} ${bold ? "font-bold" : "font-normal"}`}>{value}</span>
+    <div className="flex items-baseline gap-1.5">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-dim)]">{label}</span>
+      <span className={`${color} ${bold ? "font-bold" : "font-semibold"} font-mono tabular-nums`}>{value}</span>
     </div>
   );
 }
@@ -861,10 +909,27 @@ function SaveIcon() {
   );
 }
 
-function SearchIcon() {
+// Proper circular-restore arrow — replaces the magnifying glass used previously
+function ResetIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M7 11.5a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9ZM10.5 10.5 14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path
+        d="M3 8a5 5 0 1 0 1.6-3.65"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <path d="M2.5 2v3h3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
   );
 }
@@ -938,21 +1003,22 @@ function SymbolDropdown({ pairs, activeSym, onSymChange }) {
       <button
         ref={triggerRef}
         onClick={handleOpen}
-        className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5
+        className={`flex h-8 items-center gap-2 rounded-md border px-3
                    bg-[var(--bg-card)] transition-all duration-150 [font-family:var(--font-display)]
+                   focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]
                    ${open
-                     ? "border-[var(--blue)] text-[var(--text-primary)]"
-                     : "border-[var(--border-bright)] text-[var(--text-primary)] hover:border-[var(--blue)] hover:bg-[var(--bg-hover)]"
+                     ? "border-[var(--blue)] bg-[var(--bg-hover)]"
+                     : "border-[var(--border)] hover:border-[var(--border-bright)] hover:bg-[var(--bg-hover)]"
                    }`}
       >
         <span className="flex items-center gap-1">
           <span className="text-[11px] font-bold text-[var(--blue)] tracking-wider">{activeSym.base}</span>
-          <span className="text-[var(--text-dim)] text-[11px]">/</span>
-          <span className="text-[11px] font-bold text-[var(--text-secondary)] tracking-wider">{activeSym.quote}</span>
+          <span className="text-[var(--text-dim)] text-[10px]">/</span>
+          <span className="text-[11px] font-bold text-[var(--text-primary)] tracking-wider">{activeSym.quote}</span>
         </span>
         <svg width="9" height="9" viewBox="0 0 10 10" fill="none"
           className={`shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`}>
-          <path d="M2 3.5L5 6.5L8 3.5" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
 

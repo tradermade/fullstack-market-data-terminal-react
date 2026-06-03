@@ -5,20 +5,25 @@ function getThemeTokens() {
   if (typeof window === "undefined") return DEFAULT_T;
   const styles = getComputedStyle(document.documentElement);
   const read = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
+  const bg = read("--bg-base", DEFAULT_T.bg);
+  const bgCard = read("--bg-card", DEFAULT_T.bgCard);
+  const green = read("--green", DEFAULT_T.green);
+  const red = read("--red", DEFAULT_T.red);
+  const blue = read("--blue", DEFAULT_T.blue);
 
   return {
-    bg: read("--bg-base", DEFAULT_T.bg),
+    bg: read("--chart-bg", bg),
     bgPanel: read("--bg-panel", DEFAULT_T.bgPanel),
-    bgCard: read("--bg-card", DEFAULT_T.bgCard),
+    bgCard: read("--chart-grid", bgCard),
     bgHover: read("--bg-hover", DEFAULT_T.bgHover),
     border: read("--border", DEFAULT_T.border),
     borderBright: read("--border-bright", DEFAULT_T.borderBright),
     textPrimary: read("--text-primary", DEFAULT_T.textPrimary),
     textSecondary: read("--text-secondary", DEFAULT_T.textSecondary),
     textDim: read("--text-dim", DEFAULT_T.textDim),
-    green: read("--green", DEFAULT_T.green),
-    red: read("--red", DEFAULT_T.red),
-    blue: read("--blue", DEFAULT_T.blue),
+    green: read("--chart-green", green),
+    red: read("--chart-red", red),
+    blue: read("--chart-blue", blue),
     gold: read("--gold", DEFAULT_T.gold),
     purple: read("--purple", DEFAULT_T.purple),
     cyan: read("--cyan", DEFAULT_T.cyan),
@@ -31,27 +36,6 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value];
 }
 
-// Convert a hex/rgb/rgba color into an rgba() string with custom alpha.
-// Used by the liquidity heatmap to apply volume-based opacity.
-function hexToRgba(color, alpha = 1) {
-  if (!color) return `rgba(59,130,246,${alpha})`;
-  const c = String(color).trim();
-  if (c.startsWith("rgba")) return c.replace(/rgba\(([^)]+)\)/, (_, parts) => {
-    const [r, g, b] = parts.split(",").map(s => s.trim());
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  });
-  if (c.startsWith("rgb(")) {
-    const [r, g, b] = c.replace(/rgb\(|\)/g, "").split(",").map(s => Number(s.trim()));
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
-  const hex = c.replace("#", "");
-  const norm = hex.length === 3 ? hex.split("").map(ch => ch + ch).join("") : hex;
-  if (norm.length !== 6) return `rgba(59,130,246,${alpha})`;
-  const r = parseInt(norm.slice(0, 2), 16);
-  const g = parseInt(norm.slice(2, 4), 16);
-  const b = parseInt(norm.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
 
 function applyThemeToOptions(options, theme, decimals) {
   if (!options.chart) options.chart = {};
@@ -100,7 +84,11 @@ function applyThemeToOptions(options, theme, decimals) {
     axis.labels = {
       ...(axis.labels || {}),
       style: { color: theme.textDim, fontSize: "10px", fontFamily: theme.mono },
-      formatter() { return (this.value ?? 0).toFixed(decimals); },
+      formatter() {
+              // Return empty string when value isn't a finite number so we
+              // don't render a phantom "0.000" label during transient states.
+              return Number.isFinite(this.value) ? this.value.toFixed(decimals) : "";
+            },
     };
     axis.crosshair = {
       ...(axis.crosshair || {}),
@@ -111,24 +99,12 @@ function applyThemeToOptions(options, theme, decimals) {
         style: { color: "#fff", fontSize: "10px", fontFamily: theme.mono },
       },
     };
-    axis.lastPrice = {
-      ...(axis.lastPrice || {}),
-      color: theme.blue,
-      label: {
-        ...(axis.lastPrice?.label || {}),
-        backgroundColor: theme.blue,
-        style: { color: "#fff", fontSize: "10px", fontFamily: theme.mono },
-      },
-    };
-    axis.currentPriceIndicator = {
-      ...(axis.currentPriceIndicator || {}),
-      lineColor: theme.blue,
-      label: {
-        ...(axis.currentPriceIndicator?.label || {}),
-        backgroundColor: theme.blue,
-        style: { color: "#fff", fontSize: "10px", fontFamily: theme.mono },
-      },
-    };
+    // Force-disable axis-level price indicators — we use series.lastPrice
+    // (configured below) as the single source of truth. Multiple overlapping
+    // indicators were causing the "0.000" ghost label when one defaulted
+    // to value=0 before data loaded.
+    axis.lastPrice = { enabled: false };
+    axis.currentPriceIndicator = { enabled: false };
   });
   if (yAxes.length) options.yAxis = Array.isArray(options.yAxis) ? yAxes : yAxes[0];
 
@@ -179,20 +155,10 @@ function applyThemeToOptions(options, theme, decimals) {
           },
         };
       }
+      // Force-disable any persisted lastVisiblePrice (we don't use it; it was
+      // a source of the duplicate "0.000" label).
       if (series.lastVisiblePrice) {
-        const lastVisiblePrice = typeof series.lastVisiblePrice === "object" ? series.lastVisiblePrice : {};
-        const labelBase = { ...(lastVisiblePrice.label || {}) };
-        delete labelBase.formatter;
-        delete labelBase.format;
-        series.lastVisiblePrice = {
-          ...lastVisiblePrice,
-          label: {
-            ...labelBase,
-            backgroundColor: theme.blue,
-            style: { color: "#fff", fontSize: "10px", fontFamily: theme.mono },
-            format: `{value:.${decimals}f}`,
-          },
-        };
+        series.lastVisiblePrice = { enabled: false };
       }
     });
   }
@@ -233,20 +199,32 @@ function saveGlobalIndicators(chart) {
       globalInds.yAxis = allY.length > 1 ? allY.slice(1) : [];
     }
 
-    // Persist currentPriceIndicator state from main yAxis
+    // Persist currentPriceIndicator / lastPrice STYLES only — strip any
+    // chart-specific numeric position (`value`/`from`/`to`/`x`/`y`) so
+    // switching symbols doesn't carry the previous chart's price into the new one.
+    const stripValues = (cfg) => {
+      if (!cfg || typeof cfg !== "object") return cfg;
+      const rest = { ...cfg };
+      delete rest.value;
+      delete rest.from;
+      delete rest.to;
+      delete rest.x;
+      delete rest.y;
+      return rest;
+    };
+
     if (chart.yAxis?.[0]) {
       const mainY = chart.yAxis[0];
       const cpi = mainY.options?.currentPriceIndicator;
       if (cpi) {
-        globalInds.currentPriceIndicator = cpi;
+        globalInds.currentPriceIndicator = stripValues(cpi);
       }
-      // Also check lastPrice on the main series
       const mainSeries = chart.series?.[0];
       if (mainSeries?.options?.lastPrice) {
-        globalInds.lastPrice = mainSeries.options.lastPrice;
+        globalInds.lastPrice = stripValues(mainSeries.options.lastPrice);
       }
       if (mainSeries?.options?.lastVisiblePrice) {
-        globalInds.lastVisiblePrice = mainSeries.options.lastVisiblePrice;
+        globalInds.lastVisiblePrice = stripValues(mainSeries.options.lastVisiblePrice);
       }
     }
 
@@ -276,11 +254,21 @@ function saveChartOptions(symbol, chart) {
     }
 
     if (chart.xAxis?.length) {
-      userOptions.xAxis = getOptions(chart.xAxis);
+      userOptions.xAxis = getOptions(chart.xAxis).map(x => {
+        const clean = { ...x };
+        delete clean.min;
+        delete clean.max;
+        return clean;
+      });
     }
 
     if (chart.yAxis?.length) {
-      const allY = getOptions(chart.yAxis);
+      const allY = getOptions(chart.yAxis).map(y => {
+        const clean = { ...y };
+        delete clean.min;
+        delete clean.max;
+        return clean;
+      });
       // Main chart configuration exclusively saves its own central price axis pane
       userOptions.yAxis = allY.length ? [allY[0]] : [];
     }
@@ -301,7 +289,33 @@ function loadGlobalIndicators() {
 function loadChartOptions(symbol) {
   try {
     const raw = localStorage.getItem(symbol + "lschartoptions");
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed) {
+      if (Array.isArray(parsed.xAxis)) {
+        parsed.xAxis = parsed.xAxis.map(x => {
+          const clean = { ...x };
+          delete clean.min;
+          delete clean.max;
+          return clean;
+        });
+      } else if (parsed.xAxis) {
+        delete parsed.xAxis.min;
+        delete parsed.xAxis.max;
+      }
+      if (Array.isArray(parsed.yAxis)) {
+        parsed.yAxis = parsed.yAxis.map(y => {
+          const clean = { ...y };
+          delete clean.min;
+          delete clean.max;
+          return clean;
+        });
+      } else if (parsed.yAxis) {
+        delete parsed.yAxis.min;
+        delete parsed.yAxis.max;
+      }
+    }
+    return parsed;
   } catch { return null; }
 }
 
@@ -309,61 +323,35 @@ function mapCandles(data) {
   return data.map((d) => [d.t, d.o, d.h, d.l, d.c]);
 }
 
+function formatFinitePrice(value, decimals) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toFixed(decimals) : "";
+}
+
+function makeCrosshairLabelFormatter(decimals) {
+  return function crosshairLabelFormatter(value) {
+    const hoverPoint = this?.axis?.chart?.hoverPoint;
+    const candidates = [value, this?.value, hoverPoint?.close, hoverPoint?.y];
+    const price = candidates.find((candidate) => Number.isFinite(Number(candidate)));
+    return formatFinitePrice(price, decimals);
+  };
+}
+
 /* ── Component ───────────────────────────────────────────────────────────── */
-const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5, ladder = null }, ref) {
+const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5, onReady }, ref) {
   const containerRef = useRef(null);
   const chartRef     = useRef(null);
   const symbolRef    = useRef(symbol);
   const dataRef      = useRef(data);
   const prevDataRef  = useRef(null);
+  const onReadyRef   = useRef(onReady);
   const [themeVersion, setThemeVersion] = useState(0);
   const dataReady = Boolean(data?.length);
 
   useEffect(() => { symbolRef.current = symbol; }, [symbol]);
   useEffect(() => { dataRef.current = data; }, [data]);
+  useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
 
-  /* ── Liquidity heatmap overlay (Option 3) ─────────────────────────────
-   * For each ladder level, draw a horizontal line on the yAxis whose
-   * opacity & width scale with the level's volume. All heatmap lines are
-   * tagged with id="heat-…" so they don't collide with user-drawn lines.
-   */
-  useEffect(() => {
-    const chart = chartRef.current;
-    if (!chart || !chart.yAxis?.[0]) return;
-    const yAxis = chart.yAxis[0];
-
-    // Always remove our previous heat lines first.
-    const previousIds = (yAxis.plotLinesAndBands || [])
-      .map(pl => pl.id)
-      .filter(id => typeof id === "string" && id.startsWith("heat-"));
-    previousIds.forEach(id => yAxis.removePlotLine(id));
-
-    if (!ladder) return; // toggled off OR no ladder data for this symbol
-
-    const T = getThemeTokens();
-    const allLevels = [
-      ...(ladder.asks || []).map(l => ({ ...l, side: "ask" })),
-      ...(ladder.bids || []).map(l => ({ ...l, side: "bid" })),
-    ];
-    if (allLevels.length === 0) return;
-    const maxVol = allLevels.reduce((m, l) => Math.max(m, l.volume), 0);
-    if (maxVol <= 0) return;
-
-    allLevels.forEach((level, idx) => {
-      const ratio = Math.min(1, level.volume / maxVol);     // 0..1
-      const opacity = 0.10 + ratio * 0.55;                  // 0.10..0.65
-      const width = Math.max(1, Math.round(ratio * 6));     // 1..6 px
-      const baseColor = level.side === "ask" ? T.red : T.green;
-      yAxis.addPlotLine({
-        id: `heat-${level.side}-${idx}`,
-        value: level.price,
-        color: hexToRgba(baseColor, opacity),
-        width,
-        zIndex: 1,
-        // dashStyle: "Solid" by default
-      });
-    });
-  }, [ladder]);
 
 
   useEffect(() => {
@@ -400,6 +388,7 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
 
     const mappedData = mapCandles(dataRef.current);
     const T = getThemeTokens();
+    const crosshairLabelFormatter = makeCrosshairLabelFormatter(decimals);
 
     // Check if we have saved userOptions for this symbol
     const saved = loadChartOptions(symbol);
@@ -470,7 +459,11 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
           labels: {
             align: "left", x: 6,
             style: { color: T.textDim, fontSize: "10px", fontFamily: T.mono },
-            formatter() { return (this.value ?? 0).toFixed(decimals); },
+            formatter() {
+              // Return empty string when value isn't a finite number so we
+              // don't render a phantom "0.000" label during transient states.
+              return Number.isFinite(this.value) ? this.value.toFixed(decimals) : "";
+            },
           },
           crosshair: {
             color: T.borderBright,
@@ -481,32 +474,14 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
               backgroundColor: T.blue,
               borderRadius: 3,
               style: { color: "#fff", fontSize: "10px", fontFamily: T.mono },
-              formatter() { return (this.value ?? 0).toFixed(decimals); },
+              formatter: crosshairLabelFormatter,
             },
           },
-          lastPrice: {
-            enabled: true,
-            color: T.blue,
-            label: {
-              enabled: true,
-              backgroundColor: T.blue,
-              style: { color: "#fff", fontSize: "10px", fontFamily: T.mono },
-              formatter() { return (this.value ?? 0).toFixed(decimals); },
-            },
-          },
-          currentPriceIndicator: {
-            enabled: true,
-            lineColor: T.blue,
-            lineDashStyle: "Dash",
-            lineWidth: 1,
-            label: {
-              enabled: true,
-              backgroundColor: T.blue,
-              borderRadius: 3,
-              style: { color: "#fff", fontSize: "10px", fontFamily: T.mono },
-              format: undefined,
-            },
-          },
+          // Disabled — we use series.lastPrice (configured on the series itself)
+          // as the single price-line indicator. Multiple overlapping indicators
+          // caused the stray "0.000" label.
+          lastPrice: { enabled: false },
+          currentPriceIndicator: { enabled: false },
           plotLines: [],
         },
         tooltip: {
@@ -563,21 +538,29 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
               format: `{value:.${decimals}f}`,
             },
           },
-          lastVisiblePrice: {
-            enabled: true,
-            label: {
-              enabled: true,
-              backgroundColor: T.blue,
-              borderRadius: 3,
-              style: { color: "#fff", fontSize: "10px", fontFamily: T.mono },
-              format: `{value:.${decimals}f}`,
-            },
-          },
+          // Disabled — redundant with lastPrice and was a source of the
+          // duplicate label issue.
+          lastVisiblePrice: { enabled: false },
         }],
       };
     }
 
     // Blend in the global indicators perfectly over any setup
+    // Strip stale per-chart numeric positions from persisted price-line configs.
+    // Without this, switching symbols can carry the previous symbol's last-price
+    // value (e.g. GBPUSD's 1.35060) into the new chart's axes, expanding the
+    // y-axis range to include both numbers and squashing the actual candles.
+    const stripStaleValues = (cfg) => {
+      if (!cfg || typeof cfg !== "object") return cfg;
+      const clean = { ...cfg };
+      delete clean.value;
+      delete clean.from;
+      delete clean.to;
+      delete clean.x;
+      delete clean.y;
+      return clean;
+    };
+
     const globalInds = loadGlobalIndicators();
     if (globalInds) {
       if (globalInds.yAxis?.length) {
@@ -588,27 +571,44 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
         options.series = [...(options.series || []), ...globalInds.series];
       }
 
-      // Restore currentPriceIndicator state to main yAxis
+      // Restore currentPriceIndicator STYLE only — never the cached value/position
       if (globalInds.currentPriceIndicator) {
+        const cpi = stripStaleValues(globalInds.currentPriceIndicator);
         if (Array.isArray(options.yAxis)) {
-          if (options.yAxis[0]) options.yAxis[0].currentPriceIndicator = globalInds.currentPriceIndicator;
+          if (options.yAxis[0]) options.yAxis[0].currentPriceIndicator = cpi;
         } else if (options.yAxis) {
-          options.yAxis.currentPriceIndicator = globalInds.currentPriceIndicator;
+          options.yAxis.currentPriceIndicator = cpi;
         }
       }
 
-      // Restore lastPrice / lastVisiblePrice to main series
+      // Restore lastPrice / lastVisiblePrice STYLE only — strip stale `value`
       if (options.series?.[0]) {
         if (globalInds.lastPrice) {
-          options.series[0].lastPrice = globalInds.lastPrice;
+          options.series[0].lastPrice = stripStaleValues(globalInds.lastPrice);
         }
         if (globalInds.lastVisiblePrice) {
-          options.series[0].lastVisiblePrice = globalInds.lastVisiblePrice;
+          options.series[0].lastVisiblePrice = stripStaleValues(globalInds.lastVisiblePrice);
         }
       }
     }
 
     applyThemeToOptions(options, T, decimals);
+
+    const forceCrosshairFormatter = (axis) => {
+      if (!axis) return;
+      axis.crosshair = {
+        ...(axis.crosshair || {}),
+        label: {
+          ...(axis.crosshair?.label || {}),
+          formatter: crosshairLabelFormatter,
+        },
+      };
+    };
+    if (Array.isArray(options.yAxis)) {
+      options.yAxis.forEach(forceCrosshairFormatter);
+    } else {
+      forceCrosshairFormatter(options.yAxis);
+    }
 
     // Attach the passive auto-saving mechanism cleanly for indicators
     if (!options.chart) options.chart = {};
@@ -619,6 +619,9 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
       c._indTimer = setTimeout(() => saveGlobalIndicators(c), 1000);
     };
 
+    let disposed = false;
+    let readyFrame = 0;
+
     try {
       chartRef.current = Highcharts.stockChart(el, options);
       const first = dataRef.current[0]?.t;
@@ -628,6 +631,9 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
         chartRef.current.redraw(false);
       }
       prevDataRef.current = dataRef.current;
+      readyFrame = requestAnimationFrame(() => {
+        if (!disposed && chartRef.current) onReadyRef.current?.();
+      });
     } catch (e) {
       console.warn("Highcharts failed to init chart, possibly corrupted options", e);
       // Fallback completely
@@ -635,6 +641,8 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     }
 
     return () => {
+      disposed = true;
+      if (readyFrame) cancelAnimationFrame(readyFrame);
       if (chartRef.current) {
         try { chartRef.current.destroy(); } catch { /* ignore destroy failures */ }
         chartRef.current = null;
@@ -655,6 +663,41 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     const sameSecondLast = sameLength && data.length >= 2 && prev[prev.length - 2]?.t === data[data.length - 2]?.t;
     const lastBucketSame = sameLength && prev[prev.length - 1]?.t === data[data.length - 1]?.t;
 
+    // Capture the user's current zoom *before* we touch the series. Highcharts
+    // sets `userMin`/`userMax` ONLY when the user has interacted with the axis
+    // (zoom / pan / navigator drag / range button). If they're undefined, the
+    // axis is in default "show everything" mode and we're free to re-snap.
+    const xAxis = chart.xAxis?.[0];
+    const userExtremes = xAxis ? xAxis.getExtremes() : null;
+    const isUserZoomed =
+      !!userExtremes &&
+      (userExtremes.userMin != null || userExtremes.userMax != null);
+    const savedMin = userExtremes?.userMin ?? userExtremes?.min;
+    const savedMax = userExtremes?.userMax ?? userExtremes?.max;
+    const prevFirst = prev?.[0]?.t;
+    const prevLast = prev?.[prev.length - 1]?.t;
+    const visibleMin = userExtremes?.min;
+    const visibleMax = userExtremes?.max;
+    const viewportIsNarrowed =
+      Number.isFinite(prevFirst) &&
+      Number.isFinite(prevLast) &&
+      Number.isFinite(visibleMin) &&
+      Number.isFinite(visibleMax) &&
+      visibleMax - visibleMin < (prevLast - prevFirst) * 0.98;
+    const shouldPreserveViewport = isUserZoomed || viewportIsNarrowed;
+
+    const restoreViewport = () => {
+      if (
+        shouldPreserveViewport &&
+        xAxis &&
+        Number.isFinite(savedMin) &&
+        Number.isFinite(savedMax) &&
+        savedMax > savedMin
+      ) {
+        xAxis.setExtremes(savedMin, savedMax, false, false);
+      }
+    };
+
     // Fast path: same array shape AND same final bucket → update ONLY the last candle.
     if (sameLength && sameSecondLast && lastBucketSame && mainSeries.data?.length === data.length) {
       const lastNew = data[data.length - 1];
@@ -662,20 +705,78 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
       if (lastPoint?.update) {
         lastPoint.update(
           { x: lastNew.t, open: lastNew.o, high: lastNew.h, low: lastNew.l, close: lastNew.c },
-          true,   // redraw immediately so the wick/body grow live
-          false,  // no animation — keeps it crisp like real trading platforms
+          false,
+          false,
         );
+        restoreViewport();
+        chart.redraw(false);
         prevDataRef.current = data;
         return;
       }
     }
 
-    // Slow path: full data swap (initial load, timeframe/range change, new candle bucket).
+    // Fast path 2: one new candle bucket appended (previous bar may have also
+    // finalized into its closing values). Append + update in place so the user's
+    // zoom/pan is preserved — calling setData would force a full extremes reset.
+    const isAppendOne =
+      prev &&
+      data.length === prev.length + 1 &&
+      prev.length >= 1 &&
+      prev[prev.length - 1]?.t === data[data.length - 2]?.t &&
+      mainSeries.data?.length === prev.length;
+    if (isAppendOne) {
+      try {
+        // Finalize the previous in-progress bar with its closing OHLC values.
+        const prevFinal = data[data.length - 2];
+        const prevPoint = mainSeries.data[mainSeries.data.length - 1];
+        if (prevPoint?.update) {
+          prevPoint.update(
+            { x: prevFinal.t, open: prevFinal.o, high: prevFinal.h, low: prevFinal.l, close: prevFinal.c },
+            false,
+            false,
+          );
+        }
+        // Append the freshly-opened bucket. shift=false so we do not drop the
+        // oldest bar.
+        const lastNew = data[data.length - 1];
+        mainSeries.addPoint(
+          [lastNew.t, lastNew.o, lastNew.h, lastNew.l, lastNew.c],
+          false,
+          false,
+          false,
+        );
+        restoreViewport();
+        chart.redraw(false);
+        prevDataRef.current = data;
+        return;
+      } catch (e) {
+        console.warn("addPoint fast path failed, falling back to setData", e);
+        // fall through to the slow path
+      }
+    }
+
+    // Slow path: full data swap (initial load, timeframe/range change, large REST refresh).
     mainSeries.setData(mapCandles(data), false, false, false);
     const first = data[0]?.t;
     const last = data[data.length - 1]?.t;
     if (first != null && last != null) {
-      try { chart.xAxis[0].setExtremes(first, last, false, false); } catch { /* ignore axis reset failures */ }
+      try {
+        if (shouldPreserveViewport && Number.isFinite(savedMin) && Number.isFinite(savedMax)) {
+          // Preserve the user's zoom — clamp to the new data range so we don't
+          // try to show a window that doesn't exist anymore. We pass redraw=false
+          // so the extremes don't flash to full-range before our restore.
+          const clampedMin = Math.max(savedMin, first);
+          const clampedMax = Math.min(savedMax, last);
+          if (clampedMax > clampedMin) {
+            chart.xAxis[0].setExtremes(clampedMin, clampedMax, false, false);
+          } else {
+            chart.xAxis[0].setExtremes(first, last, false, false);
+          }
+        } else {
+          // No user zoom → snap to full range (initial load / timeframe switch).
+          chart.xAxis[0].setExtremes(first, last, false, false);
+        }
+      } catch { /* ignore axis reset failures */ }
     }
     chart.redraw(false);
     prevDataRef.current = data;

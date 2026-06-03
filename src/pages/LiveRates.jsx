@@ -29,6 +29,7 @@ function applyColorMode(colorMode) {
   } catch {
     // Storage can be unavailable in private browsing.
   }
+  window.dispatchEvent(new CustomEvent("tm-colormode-change", { detail: { colorMode } }));
   window.dispatchEvent(new CustomEvent("tm-theme-change", { detail: { colorMode } }));
 }
 

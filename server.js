@@ -45,6 +45,66 @@ const MAX_SPAN_MS = {
   daily:  365 * 24 * 60 * 60 * 1000,  // 1 year
 };
 
+const FX_MARKET_STEP_MS = 15 * 60 * 1000;
+
+function isFxMarketOpenAt(timestampMs) {
+  const date = new Date(timestampMs);
+  const day = date.getUTCDay();
+  const minutes = date.getUTCHours() * 60 + date.getUTCMinutes();
+
+  if (day === 6) return false;
+  if (day === 0) return minutes >= 21 * 60;
+  if (day === 5) return minutes < 22 * 60;
+  return true;
+}
+
+function estimateFxMarketOpenMs(startMs, endMs) {
+  let cursor = startMs;
+  let openMs = 0;
+
+  while (cursor < endMs) {
+    const next = Math.min(cursor + FX_MARKET_STEP_MS, endMs);
+    const midpoint = cursor + Math.floor((next - cursor) / 2);
+    if (isFxMarketOpenAt(midpoint)) {
+      openMs += next - cursor;
+    }
+    cursor = next;
+  }
+
+  return openMs;
+}
+
+function getMaxSpanMs(interval, period) {
+  // TraderMade rejects 1m/5m ranges that cross more than 2 working days.
+  // Calendar 48h chunks can still touch 3 working dates, so use 1-day chunks
+  // for those granularities and dedupe the overlapped chunk boundary later.
+  if (interval === "minute" && Number(period) <= 5) {
+    return 24 * 60 * 60 * 1000;
+  }
+  return MAX_SPAN_MS[interval] || MAX_SPAN_MS.daily;
+}
+
+function clampRequestWindow(start, end, interval, period) {
+  if (!start || !end) return { start, end };
+
+  const bucket = bucketDurationMs(interval, period);
+  // Use TraderMade's perceived "now" (learned from response Date headers) so
+  // we don't send end_date past their clock. Fall back to local clock if we
+  // haven't yet seen a response.
+  const tmNowMs = tmNow();
+  // Stay (one bucket or 60s, whichever larger) behind their "now"
+  const safetyMs = Math.max(bucket, 60_000);
+  const safeNow = new Date(tmNowMs - safetyMs);
+  let safeEnd = end > safeNow ? safeNow : end;
+  let safeStart = start;
+
+  if (safeStart >= safeEnd) {
+    safeStart = new Date(safeEnd.getTime() - bucket);
+  }
+
+  return { start: safeStart, end: safeEnd };
+}
+
 function parseFlexDate(s) {
   if (!s) return null;
   // Handle "YYYY-MM-DD HH:MM" or "YYYY-MM-DD"
@@ -89,25 +149,109 @@ function logTraderMadeRestRequest(route, url, params) {
   console.log(`   Query: ${JSON.stringify(safeQueryObject(params))}`);
 }
 
-async function fetchChunk(currency, start, end, interval, period, format, weekend, intraday) {
-  const params = new URLSearchParams({
-    currency,
-    api_key: REST_API_KEY,
-    format: format || 'records',
-    start_date: fmtDate(start, intraday),
-    end_date: fmtDate(end, intraday),
-  });
-  if (interval) params.append('interval', interval);
-  if (period) params.append('period', period);
-  if (weekend) params.append('weekend', weekend);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const url = `https://marketdata.tradermade.com/api/v1/timeseries?${params.toString()}`;
-  logTraderMadeRestRequest("/api/v1/timeseries", url, params);
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`TraderMade API returned ${response.status}`);
+// TraderMade's perceived "now" minus our local "now", in ms. Negative = TM
+// thinks it's earlier than we do (their clock is behind ours). We learn this
+// from the HTTP `Date` header on every successful response.
+let tmClockOffsetMs = 0;
+
+function updateTmClockOffset(response) {
+  try {
+    const dateHeader = response.headers?.get?.("date");
+    if (!dateHeader) return;
+    const tmTime = Date.parse(dateHeader);
+    if (!Number.isFinite(tmTime)) return;
+    const newOffset = tmTime - Date.now();
+    // Smooth: if we already have an offset, take a weighted average so a
+    // single rogue header doesn't yank us around.
+    tmClockOffsetMs = tmClockOffsetMs
+      ? Math.round(tmClockOffsetMs * 0.7 + newOffset * 0.3)
+      : newOffset;
+  } catch { /* ignore */ }
+}
+
+function tmNow() { return Date.now() + tmClockOffsetMs; }
+
+async function fetchTraderMadeJson(url, attempts = 3) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url);
+      updateTmClockOffset(response);
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        const message = body
+          ? `TraderMade API returned ${response.status}: ${body.slice(0, 240)}`
+          : `TraderMade API returned ${response.status}`;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    } catch (error) {
+      lastError = error;
+      const retryable = !error.status || error.status === 429 || error.status >= 500;
+      if (!retryable || attempt === attempts) break;
+      console.warn(`TraderMade REST fetch failed (${error.message}); retrying ${attempt}/${attempts - 1}`);
+      await sleep(250 * attempt);
+    }
   }
-  return response.json();
+
+  throw lastError;
+}
+
+async function fetchChunk(currency, start, end, interval, period, format, weekend, intraday) {
+  const buildRequest = (weekendValue, customEnd) => {
+    const finalEnd = customEnd || end;
+    const params = new URLSearchParams({
+      currency,
+      api_key: REST_API_KEY,
+      format: format || 'records',
+      start_date: fmtDate(start, intraday),
+      end_date: fmtDate(finalEnd, intraday),
+    });
+    if (interval) params.append('interval', interval);
+    if (period) params.append('period', period);
+    if (weekendValue) params.append('weekend', weekendValue);
+
+    return {
+      params,
+      url: `https://marketdata.tradermade.com/api/v1/timeseries?${params.toString()}`,
+    };
+  };
+
+  const fetchRequest = async (weekendValue, customEnd) => {
+    const { params, url } = buildRequest(weekendValue, customEnd);
+    logTraderMadeRestRequest("/api/v1/timeseries", url, params);
+    try {
+      return await fetchTraderMadeJson(url);
+    } catch (error) {
+      // Auto-recover from "end_date in the future" — happens on cold start
+      // before we've learned TM's clock offset, or if user's clock is way ahead.
+      // Retry with end_date clamped to TM's now (now learned from the failed
+      // response's Date header) minus a safety bucket.
+      const msg = String(error?.message || "");
+      if (error?.status === 400 && /end_date.*future/i.test(msg) && !customEnd) {
+        const bucket = bucketDurationMs(interval, period);
+        const safeEnd = new Date(tmNow() - Math.max(bucket, 60_000));
+        console.warn(`📅 TM rejected end_date as future; retrying with clamped end_date=${fmtDate(safeEnd, intraday)} (TM clock offset: ${tmClockOffsetMs}ms)`);
+        return fetchRequest(weekendValue, safeEnd);
+      }
+      throw error;
+    }
+  };
+
+  try {
+    return await fetchRequest(weekend);
+  } catch (error) {
+    if (weekend === "true") {
+      console.warn(`TraderMade REST failed with weekend=true (${error.message}); retrying without weekend flag`);
+      return fetchRequest(undefined);
+    }
+    throw error;
+  }
 }
 
 // ── REST API Proxy for historical price data ────────────────────────────────
@@ -146,56 +290,264 @@ app.get('/api/timeseries', async (req, res) => {
   try {
     logIncomingRestQuery("/api/timeseries", req.query);
     const { currency, start_date, end_date, interval, period, format, weekend } = req.query;
-    
+
     if (!currency) {
       return res.status(400).json({ error: "Missing currency parameter" });
     }
 
-    const intraday = interval && interval !== 'daily';
-    const startD = parseFlexDate(start_date);
-    const endD   = parseFlexDate(end_date);
-    const maxSpan = MAX_SPAN_MS[interval] || MAX_SPAN_MS.daily;
+    const intraday = interval && interval !== "daily";
+    const periodNum = period ? Number(period) : 1;
+    let startD = parseFlexDate(start_date);
+    let endD = parseFlexDate(end_date);
+    ({ start: startD, end: endD } = clampRequestWindow(startD, endD, interval, periodNum));
+    const startMs = startD?.getTime();
+    const endMs = endD?.getTime();
+    const maxSpan = getMaxSpanMs(interval, periodNum);
 
-    // If span within limit, single request
-    if (!startD || !endD || (endD - startD) <= maxSpan) {
-      const data = await fetchChunk(currency, startD || new Date(), endD || new Date(), interval, period, format, weekend, intraday);
-      return res.json(data);
+    if (
+      weekend === "false" &&
+      interval === "minute" &&
+      periodNum <= 5 &&
+      Number.isFinite(startMs) &&
+      Number.isFinite(endMs) &&
+      estimateFxMarketOpenMs(startMs, endMs) > MAX_SPAN_MS.minute + FX_MARKET_STEP_MS
+    ) {
+      return res.status(400).json({
+        error: "FX minute history is limited to 48 market-open hours per request; use 15M, 1H or 1D for longer ranges.",
+      });
     }
 
-    // Otherwise chunk the request
-    let allQuotes = [];
-    let chunkStart = new Date(startD.getTime());
-    let meta = null;
-
-    while (chunkStart < endD) {
-      let chunkEnd = new Date(chunkStart.getTime() + maxSpan);
-      if (chunkEnd > endD) chunkEnd = endD;
-
-      const data = await fetchChunk(currency, chunkStart, chunkEnd, interval, period, format, weekend, intraday);
-      if (!meta) meta = data;
-      if (Array.isArray(data.quotes)) {
-        allQuotes = allQuotes.concat(data.quotes);
+    // Helper: fetch fresh from TraderMade (with chunking for big ranges)
+    const fetchFreshFromTM = async (s, e) => {
+      if ((e - s) <= maxSpan) {
+        const d = await fetchChunk(currency, s, e, interval, periodNum, format, weekend, intraday);
+        return { meta: d, quotes: Array.isArray(d.quotes) ? d.quotes : [] };
       }
+      let all = [], meta = null, cs = new Date(s.getTime());
+      while (cs < e) {
+        let ce = new Date(cs.getTime() + maxSpan);
+        if (ce > e) ce = e;
+        const d = await fetchChunk(currency, cs, ce, interval, periodNum, format, weekend, intraday);
+        if (!meta) meta = d;
+        if (Array.isArray(d.quotes)) all = all.concat(d.quotes);
+        cs = new Date(ce.getTime());
+      }
+      const seen = new Set();
+      const deduped = all.filter(q => seen.has(q.date) ? false : (seen.add(q.date), true));
+      return { meta, quotes: deduped };
+    };
 
-      chunkStart = new Date(chunkEnd.getTime() + 60000); // +1min to avoid overlap
+    // If date parsing failed, bypass cache and do a fresh fetch
+    if (!startMs || !endMs || !interval) {
+      const { meta, quotes } = await fetchFreshFromTM(startD || new Date(), endD || new Date());
+      return res.json({ ...(meta || {}), quotes });
     }
 
-    // Deduplicate by date
-    const seen = new Set();
-    const deduped = allQuotes.filter(q => {
-      if (seen.has(q.date)) return false;
-      seen.add(q.date);
-      return true;
-    });
+    // ── STEP 1: pull whatever we already have from SQLite for this range ──
+    const cached = getCandlesFromDB(currency, interval, periodNum, startMs, endMs);
 
-    res.json({ ...meta, quotes: deduped });
+    // ── STEP 2: decide what (if anything) still needs fetching from TM ──
+    const currentBucket = currentBucketStartMs(interval, periodNum);
+    const bucketDur = bucketDurationMs(interval, periodNum);
+    const endTarget = Math.min(endMs, currentBucket); // never expect closed bars past current bucket
+    const earliestCached = cached.length ? cached[0].ts : null;
+    const latestCached = cached.length ? cached[cached.length - 1].ts : null;
+
+    // Cache hit conditions:
+    //  - we have data
+    //  - latest cached bar is within ONE bucket of the end target (no big gap to the live edge)
+    //  - the user's end is in the past (purely historical) OR we're going to also fetch the forming bar
+    let fresh = [];
+    const fetchRanges = [];
+
+    if (!cached.length) {
+      fetchRanges.push([startMs, endMs]);
+    } else if (latestCached < endTarget - bucketDur) {
+      // We have cached candles but they don't reach close to "now" — fetch the gap
+      if (earliestCached > startMs + bucketDur) {
+        fetchRanges.push([startMs, earliestCached - bucketDur]);
+      }
+      fetchRanges.push([latestCached + bucketDur, endMs]);
+    } else if (endMs >= currentBucket) {
+      // User wants up-to-the-second data — fetch only the forming bucket region
+      if (earliestCached > startMs + bucketDur) {
+        fetchRanges.push([startMs, earliestCached - bucketDur]);
+      }
+      fetchRanges.push([Math.max(latestCached || startMs, currentBucket - bucketDur), endMs]);
+    } else if (earliestCached > startMs + bucketDur) {
+      fetchRanges.push([startMs, earliestCached - bucketDur]);
+    }
+
+    let meta = null;
+    if (fetchRanges.length > 0) {
+      const allQuotes = [];
+      for (const [fetchStart, fetchEnd] of fetchRanges) {
+        if (fetchEnd < fetchStart) continue;
+        const { meta: m, quotes } = await fetchFreshFromTM(new Date(fetchStart), new Date(fetchEnd));
+        if (!meta) meta = m;
+        allQuotes.push(...quotes);
+      }
+      const quotes = allQuotes;
+      fresh = quotes
+        .map(q => ({
+          ts: tmDateToMs(q.date),
+          o: Number(q.open), h: Number(q.high), l: Number(q.low), c: Number(q.close),
+          date: q.date,
+        }))
+        .filter(x => Number.isFinite(x.ts) && Number.isFinite(x.c));
+
+      // Persist closed bars only. Anything in the current bucket is still forming.
+      setImmediate(() => {
+        try {
+          const closedOnly = fresh.filter(x => x.ts < currentBucket);
+          if (closedOnly.length > 0) {
+            insertCandlesToDB(currency, interval, periodNum, closedOnly);
+            console.log(`📦 SQLite (Async): cached ${closedOnly.length} closed bar(s) for ${currency} ${interval}/${periodNum} (had ${cached.length}, fetched ${fresh.length})`);
+          }
+        } catch (dbErr) {
+          console.error(`❌ SQLite insertion background error for ${currency}:`, dbErr.message);
+        }
+      });
+    } else {
+      console.log(`📦 SQLite: cache HIT for ${currency} ${interval}/${periodNum} — ${cached.length} bars served from disk, 0 TraderMade calls`);
+    }
+
+    // ── STEP 3: merge cached + fresh, dedupe by ts, sort, format back to TM shape ──
+    const byTs = new Map();
+    for (const c of cached) byTs.set(c.ts, c);
+    for (const f of fresh)  byTs.set(f.ts, f);
+
+    const merged = [...byTs.values()]
+      .filter(c => c.ts >= startMs && c.ts <= endMs)
+      .sort((a, b) => a.ts - b.ts)
+      .map(c => ({
+        date: c.date || msToTMDate(c.ts, intraday),
+        open: c.o, high: c.h, low: c.l, close: c.c,
+      }));
+
+    res.json({ ...(meta || {}), quotes: merged, endpoint: "timeseries" });
   } catch (error) {
-    console.error('REST proxy error:', error.message);
+    console.error("REST proxy error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
 import fs from 'fs';
+import Database from 'better-sqlite3';
+
+// ─── SQLite candle cache ────────────────────────────────────────────────
+// Persistent on-disk store of historical OHLC bars. Survives server restarts,
+// shared across all browser tabs/users, and keeps TraderMade REST API usage
+// down to "only forming bars + gaps".
+const DB_PATH = path.join(__dirname, "data", "candles.db");
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const candleDB = new Database(DB_PATH);
+candleDB.pragma("journal_mode = WAL"); // concurrent reads while writing
+candleDB.exec(`
+  CREATE TABLE IF NOT EXISTS candles (
+    symbol   TEXT    NOT NULL,
+    interval TEXT    NOT NULL,
+    period   INTEGER NOT NULL,
+    ts       INTEGER NOT NULL,
+    o        REAL    NOT NULL,
+    h        REAL    NOT NULL,
+    l        REAL    NOT NULL,
+    c        REAL    NOT NULL,
+    PRIMARY KEY (symbol, interval, period, ts)
+  );
+  CREATE INDEX IF NOT EXISTS idx_candles_lookup
+    ON candles (symbol, interval, period, ts);
+`);
+
+const candleSelectStmt = candleDB.prepare(`
+  SELECT ts, o, h, l, c FROM candles
+  WHERE symbol = ? AND interval = ? AND period = ?
+    AND ts >= ? AND ts <= ?
+  ORDER BY ts ASC
+`);
+
+const candleInsertStmt = candleDB.prepare(`
+  INSERT OR REPLACE INTO candles (symbol, interval, period, ts, o, h, l, c)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const candleCountStmt = candleDB.prepare(`SELECT COUNT(*) AS n FROM candles`);
+
+const candleInsertMany = candleDB.transaction((rows) => {
+  for (const r of rows) {
+    candleInsertStmt.run(r.symbol, r.interval, r.period, r.ts, r.o, r.h, r.l, r.c);
+  }
+});
+
+function getCandlesFromDB(symbol, interval, period, startMs, endMs) {
+  return candleSelectStmt.all(symbol, interval, Number(period), startMs, endMs);
+}
+
+function insertCandlesToDB(symbol, interval, period, candles) {
+  if (!candles?.length) return;
+  candleInsertMany(candles.map(c => ({
+    symbol, interval, period: Number(period),
+    ts: c.ts, o: c.o, h: c.h, l: c.l, c: c.c,
+  })));
+}
+
+// Convert TraderMade's "YYYY-MM-DD", "YYYY-MM-DD HH:MM", or "YYYY-MM-DD HH:MM:SS" into UTC ms.
+function tmDateToMs(dateStr) {
+  if (!dateStr) return null;
+  // Normalise "YYYY-MM-DD-HH:MM" → "YYYY-MM-DD HH:MM"
+  const clean = String(dateStr).replace(/-(\d{2}:\d{2})$/, " $1");
+  let iso;
+  if (clean.includes(":")) {
+    const parts = clean.split(":");
+    if (parts.length === 2) {
+      iso = clean.replace(" ", "T") + ":00Z";
+    } else {
+      iso = clean.replace(" ", "T") + "Z";
+    }
+  } else {
+    iso = clean + "T00:00:00Z";
+  }
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Format ms back into TraderMade's expected response date string.
+function msToTMDate(ms, intraday) {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const da = String(d.getUTCDate()).padStart(2, "0");
+  if (!intraday) return `${y}-${mo}-${da}`;
+  const h = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${y}-${mo}-${da} ${h}:${mi}`;
+}
+
+// Start-of-current-bucket — anything at or after this is "forming" and should
+// NOT be cached (we want fresh values for the in-progress bar).
+function currentBucketStartMs(interval, period) {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const d = now.getUTCDate();
+  if (interval === "daily") return Date.UTC(y, m, d);
+  const hour = now.getUTCHours();
+  if (interval === "hourly") {
+    return Date.UTC(y, m, d, Math.floor(hour / period) * period);
+  }
+  const minute = now.getUTCMinutes();
+  return Date.UTC(y, m, d, hour, Math.floor(minute / period) * period);
+}
+
+// How long one bucket lasts, in ms.
+function bucketDurationMs(interval, period) {
+  if (interval === "daily")  return period * 86_400_000;
+  if (interval === "hourly") return period * 3_600_000;
+  return period * 60_000;
+}
+
+console.log(`📦 SQLite candle cache: ${candleCountStmt.get().n.toLocaleString()} candles in ${DB_PATH}`);
+
 
 // ─── News feed (RSS proxy + parse + cache) ───────────────────────────────
 // Pulls FX news from public RSS feeds. No API key required. Cached server-side

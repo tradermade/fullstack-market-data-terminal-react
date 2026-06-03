@@ -7,22 +7,30 @@ export default function GlobalStyles() {
 
       :root {
         color-scheme: light;
-        --bg-base:        #f4f7fb;
+        --bg-base:        #f6f8fb;
         --bg-panel:       #ffffff;
-        --bg-card:        #eef3f8;
-        --bg-hover:       #e3ebf5;
-        --border:         #d9e2ee;
-        --border-bright:  #b8c7d8;
-        --text-primary:   #111827;
-        --text-secondary: #496178;
-        --text-dim:       #7a8ca3;
+        --bg-card:        #f0f4f8;
+        --bg-hover:       #e7eef7;
+        --border:         #dce6f0;
+        --border-bright:  #bdccdc;
+        --text-primary:   #0f172a;
+        --text-secondary: #52667c;
+        --text-dim:       #8290a3;
         --green:          #059669;
         --red:            #dc2626;
         --blue:           #2563eb;
         --gold:           #d97706;
         --purple:         #7c3aed;
         --cyan:           #0891b2;
+        --chart-bg:       #f8fafc;
+        --chart-grid:     #cfd9e6;
+        --chart-green:    var(--green);
+        --chart-red:      var(--red);
+        --chart-blue:     var(--blue);
         --overlay:        rgba(244, 247, 251, 0.86);
+        --shadow-soft:    0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+        --shadow-pop:     0 12px 34px rgba(15, 23, 42, 0.16);
+        --focus-ring:     0 0 0 3px rgba(37, 99, 235, 0.18);
         --chart-tool-icon-filter: none;
         --font-mono:      'IBM Plex Mono', monospace;
         --font-display:   'DM Sans', sans-serif;
@@ -30,22 +38,30 @@ export default function GlobalStyles() {
 
       :root.dark {
         color-scheme: dark;
-        --bg-base:        #0a0e17;
-        --bg-panel:       #0f1423;
-        --bg-card:        #141b2d;
-        --bg-hover:       #1a2540;
-        --border:         #1e2d42;
-        --border-bright:  #2d4058;
-        --text-primary:   #f0f4f9;
-        --text-secondary: #8a96a8;
-        --text-dim:       #4a5a72;
+        --bg-base:        #090e17;
+        --bg-panel:       #101724;
+        --bg-card:        #172033;
+        --bg-hover:       #202c42;
+        --border:         #223149;
+        --border-bright:  #344860;
+        --text-primary:   #f3f7fb;
+        --text-secondary: #99a7b8;
+        --text-dim:       #5c6d83;
         --green:          #10b981;
         --red:            #ef4444;
         --blue:           #3b82f6;
         --gold:           #f59e0b;
         --purple:         #8b5cf6;
         --cyan:           #06b6d4;
+        --chart-bg:       #0b111c;
+        --chart-grid:     #2a3a52;
+        --chart-green:    var(--green);
+        --chart-red:      var(--red);
+        --chart-blue:     var(--blue);
         --overlay:        rgba(10, 14, 23, 0.85);
+        --shadow-soft:    0 1px 2px rgba(0, 0, 0, 0.22), 0 10px 30px rgba(0, 0, 0, 0.28);
+        --shadow-pop:     0 16px 44px rgba(0, 0, 0, 0.42);
+        --focus-ring:     0 0 0 3px rgba(59, 130, 246, 0.22);
         --chart-tool-icon-filter: invert(1) brightness(1.5);
       }
 
@@ -57,24 +73,38 @@ export default function GlobalStyles() {
         -webkit-font-smoothing: antialiased;
         text-rendering: optimizeLegibility;
       }
+      button, input, select, textarea {
+        font: inherit;
+      }
+      button {
+        -webkit-tap-highlight-color: transparent;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      textarea:focus-visible {
+        outline: none;
+        box-shadow: var(--focus-ring);
+      }
       canvas { display: block; }
       input { color-scheme: light; }
       .dark input { color-scheme: dark; }
 
-      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar { width: 7px; height: 7px; }
       ::-webkit-scrollbar-track { background: transparent; }
       ::-webkit-scrollbar-thumb {
-        background: var(--border-bright);
-        border-radius: 3px;
-        border: 1px solid var(--border);
+        background: color-mix(in srgb, var(--border-bright) 82%, transparent);
+        border-radius: 999px;
+        border: 2px solid transparent;
+        background-clip: padding-box;
       }
       ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 
-      .highcharts-background  { fill: var(--bg-base) !important; }
-      .highcharts-plot-background { fill: var(--bg-base) !important; }
-      .highcharts-grid-line   { stroke: var(--border) !important; }
-      .highcharts-axis-line   { stroke: var(--border) !important; }
-      .highcharts-tick        { stroke: var(--border) !important; }
+      .highcharts-background  { fill: var(--chart-bg, var(--bg-base)) !important; }
+      .highcharts-plot-background { fill: var(--chart-bg, var(--bg-base)) !important; }
+      .highcharts-grid-line   { stroke: var(--chart-grid, var(--border)) !important; stroke-opacity: 0.72; }
+      .highcharts-axis-line   { stroke: var(--border) !important; stroke-opacity: 0.85; }
+      .highcharts-tick        { stroke: var(--border) !important; stroke-opacity: 0.85; }
       .highcharts-label { text-rendering: geometricPrecision; }
 
       .nav-active { border-bottom: 2px solid var(--blue); }
@@ -101,7 +131,16 @@ export default function GlobalStyles() {
       .slide-in { animation: slide-in 0.2s cubic-bezier(0.23, 1, 0.320, 1); }
       .fade-in { animation: fade-in 0.3s ease-out; }
 
-      button, input, select, textarea { transition: all 0.2s cubic-bezier(0.23, 1, 0.320, 1); }
+      button, input, select, textarea {
+        transition:
+          background-color 0.18s ease,
+          border-color 0.18s ease,
+          color 0.18s ease,
+          box-shadow 0.18s ease,
+          transform 0.18s ease,
+          opacity 0.18s ease;
+      }
+      button:active:not(:disabled) { transform: translateY(0.5px); }
     `}</style>
   );
 }

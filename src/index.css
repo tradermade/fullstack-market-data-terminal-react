@@ -17,6 +17,7 @@
 .highcharts-bindings-wrapper {
   background: var(--bg-panel) !important;
   border-right: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-soft) !important;
 }
 
 /* Aggressively target ALL list items in the toolbar */
@@ -25,6 +26,10 @@
   background-color: var(--bg-card) !important;
   background: var(--bg-card) !important;
   border-color: var(--border) !important;
+  border-radius: 4px !important;
+  margin: 3px 4px !important;
+  overflow: hidden !important;
+  transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.18s ease !important;
 }
 
 /* Menu item buttons - MUST be transparent so li background shows through */
@@ -46,6 +51,7 @@
 .highcharts-bindings-wrapper li.highcharts-current {
   background-color: var(--bg-hover) !important;
   background: var(--bg-hover) !important;
+  border-color: var(--border-bright) !important;
 }
 
 /* Ensure buttons remain transparent on hover */
@@ -71,7 +77,9 @@
 ul.highcharts-submenu-wrapper {
   background-color: var(--bg-card) !important;
   border: 1px solid var(--border) !important;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
+  border-radius: 6px !important;
+  box-shadow: var(--shadow-pop) !important;
+  overflow: hidden !important;
 }
 
 /* Arrow buttons */
@@ -101,7 +109,8 @@ ul.highcharts-submenu-wrapper {
   background-color: var(--bg-panel) !important;
   color: var(--text-primary) !important;
   border: 1px solid var(--border) !important;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
+  border-radius: 8px !important;
+  box-shadow: var(--shadow-pop) !important;
 }
 .highcharts-popup-main-title { color: var(--text-primary); border-bottom-color: var(--border) !important; }
 .highcharts-indicator-title { color: var(--text-secondary); }
@@ -110,7 +119,7 @@ ul.highcharts-submenu-wrapper {
   background-color: var(--bg-card) !important;
   border: 1px solid var(--border) !important;
   color: var(--text-primary) !important;
-  border-radius: 4px !important;
+  border-radius: 6px !important;
 }
 .highcharts-popup-lhs-col {
   background-color: var(--bg-panel) !important;
@@ -148,8 +157,8 @@ button.highcharts-tab-item.highcharts-tab-item-active {
   background-color: var(--bg-panel) !important;
   color: var(--text-primary) !important;
   padding: 0 !important; /* Managed by internal div */
-  border-radius: 4px !important;
+  border-radius: 6px !important;
   border: 1px solid var(--border) !important;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
+  box-shadow: var(--shadow-pop) !important;
   z-index: 9999 !important;
 }
