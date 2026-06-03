@@ -17,6 +17,7 @@ function saveTab(t) {
 export default function RightSidebar({
   activeMarketId,
   selectedSymbol,
+  onSymbolSelect,
 }) {
   const [tab, setTab] = useState(loadTab);
 
@@ -49,7 +50,11 @@ export default function RightSidebar({
       </div>
       <div className="flex-1 overflow-hidden">
         {tab === "watchlist"
-          ? <TickerPanel activeMarketId={activeMarketId} selectedSymbol={selectedSymbol} />
+          ? <TickerPanel
+              activeMarketId={activeMarketId}
+              selectedSymbol={selectedSymbol}
+              onSymbolSelect={onSymbolSelect}
+            />
           : <NewsPanel />
         }
       </div>

@@ -19,7 +19,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY server.js ./server.js
 
-RUN mkdir -p data && chown -R node:node /app
+RUN chown -R node:node /app
 
 USER node
 

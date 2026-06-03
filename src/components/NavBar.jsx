@@ -48,11 +48,12 @@ export default function NavBar({ activeMarket, onMarketChange }) {
     <nav className="flex h-11 shrink-0 items-center justify-between
                     border-b border-[var(--border)] bg-[var(--bg-panel)] px-4">
 
-      {/* Logo */}
+      {/* Logo — URL is read from VITE_LOGO_URL in your .env (Vite inlines
+          import.meta.env at build time, so you need to rebuild after changing it). */}
       <div className="flex items-center gap-2.5 shrink-0 mr-6">
         <div className="h-6 w-7 overflow-hidden shrink-0">
           <img
-            src="https://tradermade.com/static/imgs/tradermade_logo-02.png"
+            src={import.meta.env.VITE_LOGO_URL || "https://tradermade.com/static/imgs/tradermade_logo-02.png"}
             alt=""
             className="h-6 max-w-none object-left object-contain"
           />

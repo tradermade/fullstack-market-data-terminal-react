@@ -279,7 +279,7 @@ export default function TopBar({
 
         <Sep />
 
-        {/* Chart actions group — Save / Reset / Settings grouped as one pill */}
+        {/* Chart actions group — Save / Settings */}
         <div className="flex h-8 shrink-0 items-center gap-px rounded-md border border-[var(--border)] bg-[var(--bg-card)] p-0.5">
           <button
             onClick={handleSave}
@@ -291,18 +291,6 @@ export default function TopBar({
           >
             <SaveIcon />
             <span className="hidden lg:inline">Save</span>
-          </button>
-          <span className="h-4 w-px bg-[var(--border)]" />
-          <button
-            onClick={() => chartRef.current?.resetZoom?.()}
-            title="Reset chart zoom"
-            className="flex h-7 items-center gap-1.5 rounded px-2.5 text-[11px] font-bold tracking-wide
-                     text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]
-                     transition-all duration-150 [font-family:var(--font-display)]
-                     focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--blue)]"
-          >
-            <ResetIcon />
-            <span className="hidden lg:inline">Reset</span>
           </button>
           {onOpenSettings && (
             <>
@@ -905,21 +893,6 @@ function SaveIcon() {
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M3 2.5h8.5L13.5 4.5v9H3v-11Z" stroke="currentColor" strokeWidth="1.3" />
       <path d="M5 2.5v4h6v-4M5.5 13.5v-4h5v4" stroke="currentColor" strokeWidth="1.3" />
-    </svg>
-  );
-}
-
-// Proper circular-restore arrow — replaces the magnifying glass used previously
-function ResetIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path
-        d="M3 8a5 5 0 1 0 1.6-3.65"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-      <path d="M2.5 2v3h3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

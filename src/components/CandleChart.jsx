@@ -133,7 +133,26 @@ function applyThemeToOptions(options, theme, decimals) {
 
   if (Array.isArray(options.series)) {
     options.series.forEach((series) => {
-      if (series.type === "candlestick" || series.id === "main") {
+      // Main price series — colour depends on chart type. OHLC-shaped types
+      // need bullish/bearish split; line/area types use a single accent colour.
+      if (series.id === "main") {
+        const seriesType = series.type || "candlestick";
+        if (seriesType === "candlestick" || seriesType === "ohlc") {
+          series.color = theme.red;
+          series.upColor = theme.green;
+          series.lineColor = theme.red;
+          series.upLineColor = theme.green;
+        } else {
+          series.color = theme.blue;
+          // Strip candlestick-only options so they don't bleed in if the user
+          // later switches back: Highcharts ignores them for non-OHLC types.
+          delete series.upColor;
+          delete series.upLineColor;
+          delete series.lineColor;
+        }
+      } else if (series.type === "candlestick") {
+        // Defensive: an extra non-main candlestick series shouldn't really
+        // happen, but if it does, give it the same OHLC colour treatment.
         series.color = theme.red;
         series.upColor = theme.green;
         series.lineColor = theme.red;
@@ -178,6 +197,76 @@ function getOptions(elements) {
     }
   });
   return options;
+}
+
+// ─── Global chart type (candlestick / line / ohlc / area / ...) ────────────
+// Persisted across symbols WITHOUT a Save click — so switching pairs keeps
+// whatever type the user picked from the stock-tools toolbar.
+const CHART_TYPE_KEY = "fx_chart_type";
+const DEFAULT_CHART_TYPE = "candlestick";
+// Types we accept from the stock-tools toolbar. Anything else falls back to
+// candlestick so we don't trust garbage that landed in localStorage.
+const ALLOWED_CHART_TYPES = new Set([
+  "candlestick", "ohlc", "line", "area", "spline", "areaspline", "column",
+]);
+
+function loadGlobalChartType() {
+  try {
+    const raw = localStorage.getItem(CHART_TYPE_KEY);
+    return ALLOWED_CHART_TYPES.has(raw) ? raw : DEFAULT_CHART_TYPE;
+  } catch {
+    return DEFAULT_CHART_TYPE;
+  }
+}
+
+function saveGlobalChartType(type) {
+  if (!ALLOWED_CHART_TYPES.has(type)) return;
+  try { localStorage.setItem(CHART_TYPE_KEY, type); } catch { /* ignore */ }
+}
+
+// Toggle-style bindings for the stock-tools type-change buttons.
+// Default Highcharts behavior: clicking a type button sets that type, even
+// if it's already active (no-op). With these overrides, clicking the type
+// that's currently active REVERTS to the default (candlestick) — giving
+// users a one-click escape from any non-default mode without needing to
+// dig through localStorage or a menu.
+function makeTypeToggleBindings() {
+  const makeToggle = (typeName) => ({
+    init: function () {
+      const series = this.chart?.series?.[0];
+      if (!series) return;
+      const currentType = series.options?.type;
+      // If the clicked type matches what's already active → fall back to
+      // candlestick. Otherwise switch to the clicked type. (Clicking the
+      // candlestick button while already on candlestick is a no-op.)
+      const nextType = currentType === typeName && typeName !== DEFAULT_CHART_TYPE
+        ? DEFAULT_CHART_TYPE
+        : typeName;
+      try {
+        series.update({ type: nextType }, true);
+        // Persist immediately. The render-event auto-save would also catch
+        // this 1s later, but explicitly saving here means a fast symbol
+        // switch right after the click still sees the new type.
+        saveGlobalChartType(nextType);
+      } catch (e) {
+        console.warn("type-toggle update failed:", e);
+      }
+    },
+  });
+  return {
+    seriesTypeCandlestick: {
+      className: "highcharts-series-type-candlestick",
+      ...makeToggle("candlestick"),
+    },
+    seriesTypeOhlc: {
+      className: "highcharts-series-type-ohlc",
+      ...makeToggle("ohlc"),
+    },
+    seriesTypeLine: {
+      className: "highcharts-series-type-line",
+      ...makeToggle("line"),
+    },
+  };
 }
 
 function saveGlobalIndicators(chart) {
@@ -592,6 +681,26 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
       }
     }
 
+    // ─── Apply the global chart type ─────────────────────────────────────
+    // This overrides any type baked into the per-symbol saved layout, so
+    // changing type on one symbol propagates to every other symbol. Keep
+    // this AFTER the saved-layout / globalInds merge but BEFORE theme
+    // application, since applyThemeToOptions branches on series.type.
+    const globalType = loadGlobalChartType();
+    if (Array.isArray(options.series) && options.series[0] && globalType) {
+      options.series[0].type = globalType;
+    }
+
+    // Override the stock-tools type-change bindings so clicking an active
+    // type reverts to the default candlestick (see makeTypeToggleBindings).
+    options.navigation = {
+      ...(options.navigation || {}),
+      bindings: {
+        ...(options.navigation?.bindings || {}),
+        ...makeTypeToggleBindings(),
+      },
+    };
+
     applyThemeToOptions(options, T, decimals);
 
     const forceCrosshairFormatter = (axis) => {
@@ -610,13 +719,23 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
       forceCrosshairFormatter(options.yAxis);
     }
 
-    // Attach the passive auto-saving mechanism cleanly for indicators
+    // Attach the passive auto-saving mechanism.
+    //   - Indicators: persisted across symbols via `fx_indicators` (no Save click)
+    //   - Chart type: persisted across symbols via `fx_chart_type` (no Save click)
+    //   - Drawings / annotations: ONLY saved on explicit Save button click
     if (!options.chart) options.chart = {};
     if (!options.chart.events) options.chart.events = {};
     options.chart.events.render = function () {
       const c = this;
       clearTimeout(c._indTimer);
-      c._indTimer = setTimeout(() => saveGlobalIndicators(c), 1000);
+      c._indTimer = setTimeout(() => {
+        saveGlobalIndicators(c);
+        // Also capture the current main-series type. If the user toggled
+        // candlestick→line from the stock-tools toolbar, this is the moment
+        // we notice and persist it for every other chart.
+        const mainType = c.series?.[0]?.options?.type;
+        if (mainType) saveGlobalChartType(mainType);
+      }, 1000);
     };
 
     let disposed = false;
@@ -663,32 +782,28 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     const sameSecondLast = sameLength && data.length >= 2 && prev[prev.length - 2]?.t === data[data.length - 2]?.t;
     const lastBucketSame = sameLength && prev[prev.length - 1]?.t === data[data.length - 1]?.t;
 
-    // Capture the user's current zoom *before* we touch the series. Highcharts
-    // sets `userMin`/`userMax` ONLY when the user has interacted with the axis
-    // (zoom / pan / navigator drag / range button). If they're undefined, the
-    // axis is in default "show everything" mode and we're free to re-snap.
+    // Viewport preservation rule (per user request — keep it simple):
+    //   • prev === null  → first frame after (re)mount: snap to full range.
+    //     Covers initial load, timeframe change, symbol change, range change
+    //     (all of which remount the CandleChart via React key).
+    //   • prev !== null  → in-place update (live tick, REST poll, history
+    //     prepend on left-scroll). Preserve whatever the user is currently
+    //     looking at so the chart doesn't jump under them.
+    //
+    // Reading `userMin`/`userMax` isn't reliable here because Highcharts can
+    // have a meaningful "current view" without the user ever interacting
+    // (e.g. after addPoint extends the data range, or after a programmatic
+    // setExtremes from a previous tick). What matters is just "do we have a
+    // viewport worth keeping?" — and we do iff we've already rendered once.
     const xAxis = chart.xAxis?.[0];
-    const userExtremes = xAxis ? xAxis.getExtremes() : null;
-    const isUserZoomed =
-      !!userExtremes &&
-      (userExtremes.userMin != null || userExtremes.userMax != null);
-    const savedMin = userExtremes?.userMin ?? userExtremes?.min;
-    const savedMax = userExtremes?.userMax ?? userExtremes?.max;
-    const prevFirst = prev?.[0]?.t;
-    const prevLast = prev?.[prev.length - 1]?.t;
-    const visibleMin = userExtremes?.min;
-    const visibleMax = userExtremes?.max;
-    const viewportIsNarrowed =
-      Number.isFinite(prevFirst) &&
-      Number.isFinite(prevLast) &&
-      Number.isFinite(visibleMin) &&
-      Number.isFinite(visibleMax) &&
-      visibleMax - visibleMin < (prevLast - prevFirst) * 0.98;
-    const shouldPreserveViewport = isUserZoomed || viewportIsNarrowed;
+    const currentExtremes = xAxis ? xAxis.getExtremes() : null;
+    const savedMin = currentExtremes?.min;
+    const savedMax = currentExtremes?.max;
+    const hasPrevFrame = prev != null && prev.length > 0;
 
     const restoreViewport = () => {
       if (
-        shouldPreserveViewport &&
+        hasPrevFrame &&
         xAxis &&
         Number.isFinite(savedMin) &&
         Number.isFinite(savedMax) &&
@@ -755,16 +870,19 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
       }
     }
 
-    // Slow path: full data swap (initial load, timeframe/range change, large REST refresh).
+    // Slow path: full data swap. Two scenarios:
+    //   A. First frame after (re)mount (prev === null): always snap to full
+    //      range. This is what gives the user a consistent "fresh chart, fresh
+    //      view" after switching symbol, timeframe, or range.
+    //   B. We already have a prev frame (history-prepend on left-scroll, or a
+    //      large REST refresh that didn't match the fast paths): preserve the
+    //      user's current viewport, clamped to the new data range.
     mainSeries.setData(mapCandles(data), false, false, false);
     const first = data[0]?.t;
     const last = data[data.length - 1]?.t;
     if (first != null && last != null) {
       try {
-        if (shouldPreserveViewport && Number.isFinite(savedMin) && Number.isFinite(savedMax)) {
-          // Preserve the user's zoom — clamp to the new data range so we don't
-          // try to show a window that doesn't exist anymore. We pass redraw=false
-          // so the extremes don't flash to full-range before our restore.
+        if (hasPrevFrame && Number.isFinite(savedMin) && Number.isFinite(savedMax)) {
           const clampedMin = Math.max(savedMin, first);
           const clampedMax = Math.min(savedMax, last);
           if (clampedMax > clampedMin) {
@@ -773,7 +891,6 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
             chart.xAxis[0].setExtremes(first, last, false, false);
           }
         } else {
-          // No user zoom → snap to full range (initial load / timeframe switch).
           chart.xAxis[0].setExtremes(first, last, false, false);
         }
       } catch { /* ignore axis reset failures */ }

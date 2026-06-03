@@ -3,6 +3,7 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -22,17 +23,21 @@ app.use(express.static(path.join(__dirname, 'dist')));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const REST_API_KEY = process.env.VITE_TRADERMADE_API_KEY;
-const API_KEY = process.env.VITE_TRADERMADE_WS_API_KEY;
+// Read the new (unprefixed) env var names, falling back to the old VITE_*
+// names so existing .env files keep working. Server-only vars don't need
+// the VITE_ prefix — that prefix is only required for variables the browser
+// bundle reads via import.meta.env.
+const REST_API_KEY = process.env.TRADERMADE_API_KEY    || process.env.VITE_TRADERMADE_API_KEY;
+const API_KEY      = process.env.TRADERMADE_WS_API_KEY || process.env.VITE_TRADERMADE_WS_API_KEY;
 
 if (!API_KEY) {
-  console.error("❌ FATAL: VITE_TRADERMADE_WS_API_KEY is missing in your .env file!");
+  console.error("❌ FATAL: TRADERMADE_WS_API_KEY is missing in your .env file!");
 } else {
   console.log("🔑 WS API Key found, starting proxy...");
 }
 
 if (!REST_API_KEY) {
-  console.error("❌ FATAL: VITE_TRADERMADE_API_KEY is missing in your .env file!");
+  console.error("❌ FATAL: TRADERMADE_API_KEY is missing in your .env file!");
 } else {
   console.log("🔑 REST API Key found, adding proxy routes...");
 }
@@ -337,92 +342,30 @@ app.get('/api/timeseries', async (req, res) => {
       return { meta, quotes: deduped };
     };
 
-    // If date parsing failed, bypass cache and do a fresh fetch
-    if (!startMs || !endMs || !interval) {
-      const { meta, quotes } = await fetchFreshFromTM(startD || new Date(), endD || new Date());
-      return res.json({ ...(meta || {}), quotes });
-    }
+    // Fetch fresh from TraderMade on every request. No server-side cache —
+    // the browser keeps an in-memory dedupe cache per tab (timeseriesCache.js),
+    // which is enough to keep things snappy while the tab is open.
+    const { meta, quotes } = await fetchFreshFromTM(
+      startD || new Date(),
+      endD || new Date(),
+    );
 
-    // ── STEP 1: pull whatever we already have from SQLite for this range ──
-    const cached = getCandlesFromDB(currency, interval, periodNum, startMs, endMs);
-
-    // ── STEP 2: decide what (if anything) still needs fetching from TM ──
-    const currentBucket = currentBucketStartMs(interval, periodNum);
-    const bucketDur = bucketDurationMs(interval, periodNum);
-    const endTarget = Math.min(endMs, currentBucket); // never expect closed bars past current bucket
-    const earliestCached = cached.length ? cached[0].ts : null;
-    const latestCached = cached.length ? cached[cached.length - 1].ts : null;
-
-    // Cache hit conditions:
-    //  - we have data
-    //  - latest cached bar is within ONE bucket of the end target (no big gap to the live edge)
-    //  - the user's end is in the past (purely historical) OR we're going to also fetch the forming bar
-    let fresh = [];
-    const fetchRanges = [];
-
-    if (!cached.length) {
-      fetchRanges.push([startMs, endMs]);
-    } else if (latestCached < endTarget - bucketDur) {
-      // We have cached candles but they don't reach close to "now" — fetch the gap
-      if (earliestCached > startMs + bucketDur) {
-        fetchRanges.push([startMs, earliestCached - bucketDur]);
-      }
-      fetchRanges.push([latestCached + bucketDur, endMs]);
-    } else if (endMs >= currentBucket) {
-      // User wants up-to-the-second data — fetch only the forming bucket region
-      if (earliestCached > startMs + bucketDur) {
-        fetchRanges.push([startMs, earliestCached - bucketDur]);
-      }
-      fetchRanges.push([Math.max(latestCached || startMs, currentBucket - bucketDur), endMs]);
-    } else if (earliestCached > startMs + bucketDur) {
-      fetchRanges.push([startMs, earliestCached - bucketDur]);
-    }
-
-    let meta = null;
-    if (fetchRanges.length > 0) {
-      const allQuotes = [];
-      for (const [fetchStart, fetchEnd] of fetchRanges) {
-        if (fetchEnd < fetchStart) continue;
-        const { meta: m, quotes } = await fetchFreshFromTM(new Date(fetchStart), new Date(fetchEnd));
-        if (!meta) meta = m;
-        allQuotes.push(...quotes);
-      }
-      const quotes = allQuotes;
-      fresh = quotes
-        .map(q => ({
-          ts: tmDateToMs(q.date),
-          o: Number(q.open), h: Number(q.high), l: Number(q.low), c: Number(q.close),
-          date: q.date,
-        }))
-        .filter(x => Number.isFinite(x.ts) && Number.isFinite(x.c));
-
-      // Persist closed bars only. Anything in the current bucket is still forming.
-      setImmediate(() => {
-        try {
-          const closedOnly = fresh.filter(x => x.ts < currentBucket);
-          if (closedOnly.length > 0) {
-            insertCandlesToDB(currency, interval, periodNum, closedOnly);
-            console.log(`📦 SQLite (Async): cached ${closedOnly.length} closed bar(s) for ${currency} ${interval}/${periodNum} (had ${cached.length}, fetched ${fresh.length})`);
-          }
-        } catch (dbErr) {
-          console.error(`❌ SQLite insertion background error for ${currency}:`, dbErr.message);
-        }
-      });
-    } else {
-      console.log(`📦 SQLite: cache HIT for ${currency} ${interval}/${periodNum} — ${cached.length} bars served from disk, 0 TraderMade calls`);
-    }
-
-    // ── STEP 3: merge cached + fresh, dedupe by ts, sort, format back to TM shape ──
-    const byTs = new Map();
-    for (const c of cached) byTs.set(c.ts, c);
-    for (const f of fresh)  byTs.set(f.ts, f);
-
-    const merged = [...byTs.values()]
-      .filter(c => c.ts >= startMs && c.ts <= endMs)
+    // Normalize, drop garbage rows, sort by timestamp, and re-emit in TM's
+    // exact response shape so the frontend's existing parser keeps working.
+    const merged = (quotes || [])
+      .map(q => ({
+        ts: tmDateToMs(q.date),
+        date: q.date,
+        open: Number(q.open),
+        high: Number(q.high),
+        low:  Number(q.low),
+        close: Number(q.close),
+      }))
+      .filter(x => Number.isFinite(x.ts) && Number.isFinite(x.close))
       .sort((a, b) => a.ts - b.ts)
       .map(c => ({
         date: c.date || msToTMDate(c.ts, intraday),
-        open: c.o, high: c.h, low: c.l, close: c.c,
+        open: c.open, high: c.high, low: c.low, close: c.close,
       }));
 
     res.json({ ...(meta || {}), quotes: merged, endpoint: "timeseries" });
@@ -432,64 +375,10 @@ app.get('/api/timeseries', async (req, res) => {
   }
 });
 
-import fs from 'fs';
-import Database from 'better-sqlite3';
-
-// ─── SQLite candle cache ────────────────────────────────────────────────
-// Persistent on-disk store of historical OHLC bars. Survives server restarts,
-// shared across all browser tabs/users, and keeps TraderMade REST API usage
-// down to "only forming bars + gaps".
-const DB_PATH = path.join(__dirname, "data", "candles.db");
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const candleDB = new Database(DB_PATH);
-candleDB.pragma("journal_mode = WAL"); // concurrent reads while writing
-candleDB.exec(`
-  CREATE TABLE IF NOT EXISTS candles (
-    symbol   TEXT    NOT NULL,
-    interval TEXT    NOT NULL,
-    period   INTEGER NOT NULL,
-    ts       INTEGER NOT NULL,
-    o        REAL    NOT NULL,
-    h        REAL    NOT NULL,
-    l        REAL    NOT NULL,
-    c        REAL    NOT NULL,
-    PRIMARY KEY (symbol, interval, period, ts)
-  );
-  CREATE INDEX IF NOT EXISTS idx_candles_lookup
-    ON candles (symbol, interval, period, ts);
-`);
-
-const candleSelectStmt = candleDB.prepare(`
-  SELECT ts, o, h, l, c FROM candles
-  WHERE symbol = ? AND interval = ? AND period = ?
-    AND ts >= ? AND ts <= ?
-  ORDER BY ts ASC
-`);
-
-const candleInsertStmt = candleDB.prepare(`
-  INSERT OR REPLACE INTO candles (symbol, interval, period, ts, o, h, l, c)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-const candleCountStmt = candleDB.prepare(`SELECT COUNT(*) AS n FROM candles`);
-
-const candleInsertMany = candleDB.transaction((rows) => {
-  for (const r of rows) {
-    candleInsertStmt.run(r.symbol, r.interval, r.period, r.ts, r.o, r.h, r.l, r.c);
-  }
-});
-
-function getCandlesFromDB(symbol, interval, period, startMs, endMs) {
-  return candleSelectStmt.all(symbol, interval, Number(period), startMs, endMs);
-}
-
-function insertCandlesToDB(symbol, interval, period, candles) {
-  if (!candles?.length) return;
-  candleInsertMany(candles.map(c => ({
-    symbol, interval, period: Number(period),
-    ts: c.ts, o: c.o, h: c.h, l: c.l, c: c.c,
-  })));
-}
+// ─── Date / bucket helpers ──────────────────────────────────────────────
+// Used by the timeseries handler and the request-window clamp. (We removed
+// the SQLite candle cache — server is now a pure pass-through proxy to
+// TraderMade. The browser keeps its own in-memory dedupe cache per tab.)
 
 // Convert TraderMade's "YYYY-MM-DD", "YYYY-MM-DD HH:MM", or "YYYY-MM-DD HH:MM:SS" into UTC ms.
 function tmDateToMs(dateStr) {
@@ -523,31 +412,12 @@ function msToTMDate(ms, intraday) {
   return `${y}-${mo}-${da} ${h}:${mi}`;
 }
 
-// Start-of-current-bucket — anything at or after this is "forming" and should
-// NOT be cached (we want fresh values for the in-progress bar).
-function currentBucketStartMs(interval, period) {
-  const now = new Date();
-  const y = now.getUTCFullYear();
-  const m = now.getUTCMonth();
-  const d = now.getUTCDate();
-  if (interval === "daily") return Date.UTC(y, m, d);
-  const hour = now.getUTCHours();
-  if (interval === "hourly") {
-    return Date.UTC(y, m, d, Math.floor(hour / period) * period);
-  }
-  const minute = now.getUTCMinutes();
-  return Date.UTC(y, m, d, hour, Math.floor(minute / period) * period);
-}
-
 // How long one bucket lasts, in ms.
 function bucketDurationMs(interval, period) {
   if (interval === "daily")  return period * 86_400_000;
   if (interval === "hourly") return period * 3_600_000;
   return period * 60_000;
 }
-
-console.log(`📦 SQLite candle cache: ${candleCountStmt.get().n.toLocaleString()} candles in ${DB_PATH}`);
-
 
 // ─── News feed (RSS proxy + parse + cache) ───────────────────────────────
 // Pulls FX news from public RSS feeds. No API key required. Cached server-side

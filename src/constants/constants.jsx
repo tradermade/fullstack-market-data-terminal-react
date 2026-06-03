@@ -127,7 +127,6 @@ export const CRYPTO_PAIRS = [
   { sym: "ETCBTC",  base: "ETC",  quote: "BTC", name: "Ethereum Classic / Bitcoin", decimals: 6 },
   { sym: "LINKBTC", base: "LINK", quote: "BTC", name: "Chainlink / Bitcoin", decimals: 6 },
   { sym: "BNBBTC",  base: "BNB",  quote: "BTC", name: "BNB / Bitcoin", decimals: 6 },
-  { sym: "BTCTUSD", base: "BTC",  quote: "TUSD", name: "Bitcoin / TrueUSD", decimals: 2 },
   { sym: "WBTCBTC", base: "WBTC", quote: "BTC", name: "Wrapped Bitcoin / Bitcoin", decimals: 6 },
   { sym: "ALGOUSD", base: "ALGO", quote: "USD", name: "Algorand", decimals: 5 },
   { sym: "USDCUSD", base: "USDC", quote: "USD", name: "USD Coin", decimals: 5 },

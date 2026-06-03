@@ -869,6 +869,14 @@ export default function TradingPortal() {
               <RightSidebar
                 activeMarketId={activeMarket.id}
                 selectedSymbol={activeSym.sym}
+                onSymbolSelect={(symStr) => {
+                  // Watchlist row clicked. Mutate state directly instead of
+                  // routing through the URL — TradingPortal reads the URL only
+                  // on mount (didInitFromUrlRef), so a navigate() call here
+                  // would update the URL but leave the chart on the old symbol.
+                  const resolved = findMarketSymbol(symStr);
+                  if (resolved) setActiveSym(resolved.symbol);
+                }}
               />
             </div>
           </div>

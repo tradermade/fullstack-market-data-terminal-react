@@ -66,11 +66,6 @@ A self-hosted, production-ready trading terminal built on top of the [TraderMade
 - All preferences persisted in `localStorage`
 - TraderMade branding swappable with one image URL
 
-### Persistent caching
-- **SQLite candle cache** on the server — historical bars cached once, served from disk on subsequent requests
-- Survives restarts, shared across all users and browser tabs
-- Only the live forming bar is ever re-fetched from TraderMade
-
 ### Symbol coverage
 - 2,800+ FX pairs (all combinations of 75 currencies)
 - Metals (XAU, XAG, XPT, XPD vs USD/EUR)
@@ -93,14 +88,12 @@ A self-hosted, production-ready trading terminal built on top of the [TraderMade
 ┌────────────▼───────────────────────────────────────▼────────────┐
 │              Node.js + Express + ws (server.js)                 │
 │   ┌─────────────────────────┐    ┌────────────────────────────┐ │
-│   │  WS proxy (shared upstream│    │  REST proxy              │ │
-│   │  TraderMade WebSocket   │    │  Historical + timeseries   │ │
-│   └─────────────────────────┘    └──────────┬─────────────────┘ │
-│                                              │                  │
-│   ┌─────────────────────────┐                │                  │
-│   │  SQLite candle cache    │◀───────────────┘                  │
-│   │  data/candles.db        │                                   │
-│   └─────────────────────────┘                                   │
+│   │  WS proxy (shared       │    │  REST proxy (pass-through  │ │
+│   │  upstream TraderMade WS)│    │  to TraderMade REST)       │ │
+│   └─────────────────────────┘    └────────────────────────────┘ │
+│                                                                 │
+│   Stateless — no on-disk cache. The browser keeps an in-memory  │
+│   dedupe cache per tab (lost on refresh).                       │
 └────────────┬─────────────────────────────────────┬──────────────┘
              │ wss://stream.tradermade.com         │ https://marketdata.tradermade.com
              │                                     │
@@ -140,11 +133,14 @@ npm install
 Create a `.env` file in the project root:
 
 ```env
-VITE_TRADERMADE_API_KEY=your_rest_api_key
-VITE_TRADERMADE_WS_API_KEY=your_websocket_api_key
+TRADERMADE_API_KEY=your_rest_api_key
+TRADERMADE_WS_API_KEY=your_websocket_api_key
+
+# Optional: your own logo for the top-left of the terminal
+# VITE_LOGO_URL=https://your-domain.com/logo.png
 ```
 
-> The `VITE_` prefix is required by Vite — the values are still read server-side via `dotenv`.
+> The API keys are read server-side via `dotenv` and never reach the browser, so they don't need the `VITE_` prefix. The `VITE_LOGO_URL` does need the prefix because it's inlined into the browser bundle by Vite at build time. Existing `.env` files using `VITE_TRADERMADE_*` keep working — `server.js` reads both names.
 
 ### 3. Build & run
 
@@ -165,8 +161,9 @@ You should see live tick streaming on the watchlist and a populated EUR/USD char
 
 | Variable | Required | Description |
 |---|---|---|
-| `VITE_TRADERMADE_API_KEY` | yes | REST API key — historical, timeseries, live snapshot |
-| `VITE_TRADERMADE_WS_API_KEY` | yes | WebSocket API key — streaming ticks |
+| `TRADERMADE_API_KEY` | yes | REST API key — historical, timeseries, live snapshot. Read by `server.js`. Old name `VITE_TRADERMADE_API_KEY` still works as a fallback. |
+| `TRADERMADE_WS_API_KEY` | yes | WebSocket API key — streaming ticks. Read by `server.js`. Old name `VITE_TRADERMADE_WS_API_KEY` still works as a fallback. |
+| `VITE_LOGO_URL` | no | Logo image URL or `/public`-relative path shown in the top-left of the terminal. Must keep the `VITE_` prefix because the browser bundle reads it. Falls back to the default TraderMade logo when unset. |
 | `PORT` | no | Override the server port (default `3001`) |
 | `NODE_ENV` | no | Set to `production` in Docker / production deployments |
 | `VITE_PROXY_WS_URL` | no | Override the WebSocket proxy URL from the browser side (rarely needed) |
@@ -220,7 +217,7 @@ What this does:
 - Builds the Vite frontend inside the image
 - Runs `server.js` in production mode
 - Reads secrets from `.env`
-- Persists `data/candles.db` (SQLite cache) and `data/active-symbols.json` in a named volume
+- Stateless — no volume to mount
 
 ### Manual Docker
 
@@ -229,15 +226,13 @@ docker build -t tradermade-fx-dashboard .
 docker run \
   --env-file .env \
   -p 3001:3001 \
-  -v tradermade-fx-data:/app/data \
   tradermade-fx-dashboard
 ```
 
-### Stopping & cleaning up
+### Stopping
 
 ```bash
-docker compose down               # stop, keep the volume
-docker compose down -v            # stop, wipe the SQLite cache too
+docker compose down
 ```
 
 ---
@@ -269,8 +264,7 @@ tradermade-fx-dashboard/
 │   │   └── LiveRates.jsx       Live rates landing page
 │   ├── constants/              Markets, timeframes, currency lists
 │   └── styles/                 Global CSS variables + GlobalStyles component
-├── data/                       Runtime data (SQLite cache, persisted symbols)
-├── server.js                   Express + ws proxy + REST + SQLite cache
+├── server.js                   Express + ws proxy + REST pass-through
 ├── Dockerfile                  Multi-stage image
 ├── docker-compose.yml          Compose service definition
 ├── vite.config.js              Vite config (React + Tailwind)
@@ -288,33 +282,25 @@ tradermade-fx-dashboard/
 3. The server multiplexes subscriptions across all browser clients
 4. Forming-bar ticks are pushed to each client immediately for live chart updates
 
-### REST pipeline + SQLite cache
+### REST pipeline
 
 When the browser fetches historical data:
 
 ```
 Browser → /api/timeseries
             ↓
-       SQLite lookup
+   server.js proxies straight to TraderMade
             ↓
-   ┌────────┴────────┐
-   ▼                 ▼
-Have all bars?    Need fetch?
-   │                 │
-   │ Yes             │ Yes
-   │                 │ → call TraderMade
-   │                 │ → cache the closed bars
-   │                 │
-   └────────┬────────┘
-            ▼
-        Return merged result
+   normalize + sort + return
 ```
 
-Closed candles are immutable — once cached, they're served from disk forever, dramatically reducing TraderMade API quota usage.
+The server is stateless — no on-disk cache. Each request hits TraderMade fresh. The browser keeps a small in-memory dedupe cache per tab (`src/utils/timeseriesCache.js`) so repeating the same query inside one tab session is instant, but a hard refresh clears it.
+
+If you're on a low TraderMade plan with tight rate limits and want a persistent cache back, the previous SQLite implementation is in git history — restore it by reverting the relevant commit.
 
 ### Forming bar handling
 
-The "current" (still-updating) candle is **never** persisted — it's always refetched on every request and updated tick-by-tick from the WebSocket. This guarantees the live edge of the chart stays accurate.
+The "current" (still-updating) candle is updated tick-by-tick from the WebSocket. The 30-second REST poll in `TradingPortal.jsx` re-fetches the last 2 periods as a safety net for any ticks the WS may have dropped.
 
 ---
 
@@ -342,7 +328,7 @@ Light/dark toggle is available in the NavBar. All colours flow through CSS varia
 
 ### "No quotes returned" / empty chart
 
-- Verify both `VITE_TRADERMADE_API_KEY` and `VITE_TRADERMADE_WS_API_KEY` are set in `.env`
+- Verify both `TRADERMADE_API_KEY` and `TRADERMADE_WS_API_KEY` (or their legacy `VITE_` names) are set in `.env`
 - Check the server console for `📤 TraderMade Market Data REST` lines — they show what's being requested
 - If your system clock is significantly ahead of UTC, the server's clock-skew detection will compensate automatically, but extreme drift can cause failures
 - Illiquid pairs (e.g. `AED/ALL`) genuinely don't have minute/hourly data on lower TraderMade plans — try 1 D timeframe
@@ -365,14 +351,6 @@ If you see `not on this plan`, contact TraderMade support to enable ladder acces
 ### News panel stuck on "Loading..."
 
 The news source RSS feeds (ForexLive / FXStreet / Investing.com) can occasionally rate-limit or be unreachable. The server retries every 5 min. If all three fail you'll see a permanent loading state — verify outbound HTTPS works from your server.
-
-### Clearing the SQLite cache
-
-```bash
-rm data/candles.db data/candles.db-wal data/candles.db-shm
-```
-
-It'll be rebuilt the next time you load any chart.
 
 ### Clearing browser-side state
 

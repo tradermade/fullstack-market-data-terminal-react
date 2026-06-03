@@ -4,7 +4,7 @@ import TickRow from "./TickRow";
 import { MARKETS } from "../constants/constants";
 import { loadLiveRateTickers } from "../constants/liveRates";
 
-export default function TickerPanel({ activeMarketId, selectedSymbol }) {
+export default function TickerPanel({ activeMarketId, selectedSymbol, onSymbolSelect }) {
   const [watchlist, setWatchlist] = useState(loadLiveRateTickers);
   const { ticks, status } = useSharedMarketData(watchlist);
 
@@ -100,16 +100,38 @@ export default function TickerPanel({ activeMarketId, selectedSymbol }) {
                   const symDef = market.symbols.find((s) => s.sym === sym)
                     ?? allSymbols.find((s) => s.sym === sym);
 
+                  // Build a click handler that mutates parent state directly
+                  // (used when the watchlist is rendered inside TradingPortal).
+                  // When `onSymbolSelect` isn't supplied (e.g. on the Live Rates
+                  // landing page), TickRow falls back to its default `navigate`
+                  // behavior — fresh mount of TradingPortal reads the URL on
+                  // mount, so that path works fine.
+                  const rowOnClick = onSymbolSelect
+                    ? () => onSymbolSelect(sym)
+                    : undefined;
+
                   if (!tick) {
                     return (
-                      <div key={sym} className="px-3 py-2 border-b border-[var(--border)] font-mono text-[9px] text-[var(--text-dim)]">
+                      <div
+                        key={sym}
+                        onClick={rowOnClick}
+                        className={`px-3 py-2 border-b border-[var(--border)] font-mono text-[9px] text-[var(--text-dim)]
+                                    ${rowOnClick ? "cursor-pointer hover:bg-[var(--bg-hover)]" : ""}`}
+                      >
                         <span className="text-[var(--blue)] font-bold tracking-wider">{sym}</span>
                         <span className="ml-2">{isLive ? "Waiting for tick…" : "—"}</span>
                       </div>
                     );
                   }
 
-                  return <TickRow key={tick.symbol} tick={tick} decimals={symDef?.decimals ?? 5} />;
+                  return (
+                    <TickRow
+                      key={tick.symbol}
+                      tick={tick}
+                      decimals={symDef?.decimals ?? 5}
+                      onClick={rowOnClick}
+                    />
+                  );
                 })
               )}
             </div>
