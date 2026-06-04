@@ -2,6 +2,11 @@ services:
   fx-dashboard:
     build:
       context: .
+      args:
+        VITE_LOGO_URL: ${VITE_LOGO_URL:-}
+        VITE_BRAND_NAME: ${VITE_BRAND_NAME:-}
+        VITE_BRAND_BADGE: ${VITE_BRAND_BADGE:-}
+        VITE_PROXY_WS_URL: ${VITE_PROXY_WS_URL:-}
     env_file:
       - .env
     environment:

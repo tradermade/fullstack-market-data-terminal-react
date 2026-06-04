@@ -1,3 +1,5 @@
+import { brandName } from "../config/branding";
+
 export default function StatusBar({ symbol, tf, market }) {
   const st = market?.getStatus();
 
@@ -12,7 +14,7 @@ export default function StatusBar({ symbol, tf, market }) {
         <Divider />
         <StatusItem label="TF" value={tf?.label ?? "—"} />
         <Divider />
-        <StatusItem label="SRC" value="TraderMade" />
+        <StatusItem label="SRC" value={brandName} />
         {st && (
           <>
             <Divider />

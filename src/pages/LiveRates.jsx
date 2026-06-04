@@ -4,6 +4,7 @@ import { useSharedMarketData } from "../context/MarketDataContext.jsx";
 import GainersLosers from "../components/GainersLosers";
 import { CURRENCY_PAIRS, CRYPTO_PAIRS, US_STOCKS } from "../constants/constants";
 import { LIVE_RATES_MAX_SYMBOLS, loadLiveRateTickers, saveLiveRateTickers } from "../constants/liveRates";
+import { brandBadge, brandName } from "../config/branding";
 
 /* ── Static data ────────────────────────────────────────────────────────── */
 const ALL_PAIRS = [
@@ -359,9 +360,9 @@ export default function LiveRates() {
           <div style={{ width:24, height:24, borderRadius:4, background: C.blue,
                         display:"flex", alignItems:"center", justifyContent:"center",
                         fontSize:9, fontWeight:900, color:"#fff", letterSpacing:"-0.5px" }}>FX</div>
-          <span style={{ fontSize:13, fontWeight:800, letterSpacing:"0.14em", color: C.txt }}>TERMINAL</span>
+          <span style={{ fontSize:13, fontWeight:800, letterSpacing:"0.14em", color: C.txt }}>{brandName.toUpperCase()}</span>
           <span style={{ fontSize:8, fontWeight:800, letterSpacing:"0.18em", padding:"2px 6px",
-                         borderRadius:3, background:C.softBlue, color: C.blue }}>PRO</span>
+                         borderRadius:3, background:C.softBlue, color: C.blue }}>{brandBadge}</span>
         </div>
 
         {/* WS status + title */}

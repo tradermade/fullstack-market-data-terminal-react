@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { MARKETS } from "../constants/constants";
+import { brandBadge, brandLogoUrl, brandName } from "../config/branding";
 
 function getInitialColorMode() {
   try {
@@ -53,17 +54,17 @@ export default function NavBar({ activeMarket, onMarketChange }) {
       <div className="flex items-center gap-2.5 shrink-0 mr-6">
         <div className="h-6 w-7 overflow-hidden shrink-0">
           <img
-            src={import.meta.env.VITE_LOGO_URL || "https://tradermade.com/static/imgs/tradermade_logo-02.png"}
+            src={brandLogoUrl}
             alt=""
             className="h-6 max-w-none object-left object-contain"
           />
         </div>
         <span className="text-[18px] font-semibold leading-none text-[var(--text-primary)] tracking-normal">
-          TraderMade
+          {brandName}
         </span>
         <span className="rounded bg-[var(--blue)]/15 px-1.5 py-0.5 text-[9px]
                          font-bold tracking-widest text-[var(--blue)] uppercase">
-          Terminal
+          {brandBadge}
         </span>
       </div>
 

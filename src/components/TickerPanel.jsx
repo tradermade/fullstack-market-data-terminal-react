@@ -3,8 +3,9 @@ import { useSharedMarketData } from "../context/MarketDataContext.jsx";
 import TickRow from "./TickRow";
 import { MARKETS } from "../constants/constants";
 import { loadLiveRateTickers } from "../constants/liveRates";
+import { brandName } from "../config/branding";
 
-export default function TickerPanel({ activeMarketId, selectedSymbol, onSymbolSelect }) {
+export default function TickerPanel({ activeMarketId, onSymbolSelect }) {
   const [watchlist, setWatchlist] = useState(loadLiveRateTickers);
   const { ticks, status } = useSharedMarketData(watchlist);
 
@@ -142,7 +143,7 @@ export default function TickerPanel({ activeMarketId, selectedSymbol, onSymbolSe
       {/* Footer */}
       <div className="shrink-0 border-t border-[var(--border)] px-3 py-1.5">
         <p className="font-mono text-[9px] text-[var(--text-dim)] text-center uppercase tracking-wider">
-          TraderMade WebSocket · Shared Live Rates Watchlist
+          {brandName} WebSocket · Shared Live Rates Watchlist
         </p>
       </div>
     </div>

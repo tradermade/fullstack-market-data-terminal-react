@@ -138,6 +138,8 @@ TRADERMADE_WS_API_KEY=your_websocket_api_key
 
 # Optional: your own logo for the top-left of the terminal
 # VITE_LOGO_URL=https://your-domain.com/logo.png
+# VITE_BRAND_NAME=TraderMade
+# VITE_BRAND_BADGE=Terminal
 ```
 
 > The API keys are read server-side via `dotenv` and never reach the browser, so they don't need the `VITE_` prefix. The `VITE_LOGO_URL` does need the prefix because it's inlined into the browser bundle by Vite at build time. Existing `.env` files using `VITE_TRADERMADE_*` keep working — `server.js` reads both names.
@@ -164,6 +166,8 @@ You should see live tick streaming on the watchlist and a populated EUR/USD char
 | `TRADERMADE_API_KEY` | yes | REST API key — historical, timeseries, live snapshot. Read by `server.js`. Old name `VITE_TRADERMADE_API_KEY` still works as a fallback. |
 | `TRADERMADE_WS_API_KEY` | yes | WebSocket API key — streaming ticks. Read by `server.js`. Old name `VITE_TRADERMADE_WS_API_KEY` still works as a fallback. |
 | `VITE_LOGO_URL` | no | Logo image URL or `/public`-relative path shown in the top-left of the terminal. Must keep the `VITE_` prefix because the browser bundle reads it. Falls back to the default TraderMade logo when unset. |
+| `VITE_BRAND_NAME` | no | Brand text shown next to the navbar logo. Build-time Vite value; rebuild the frontend / Docker image after changing it. Defaults to `TraderMade`. |
+| `VITE_BRAND_BADGE` | no | Small badge text shown beside the brand name. Build-time Vite value; rebuild the frontend / Docker image after changing it. Defaults to `Terminal`. |
 | `PORT` | no | Override the server port (default `3001`) |
 | `NODE_ENV` | no | Set to `production` in Docker / production deployments |
 | `VITE_PROXY_WS_URL` | no | Override the WebSocket proxy URL from the browser side (rarely needed) |

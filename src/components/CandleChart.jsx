@@ -610,19 +610,9 @@ function visibleCandles(data, visibleStartMs = null, visibleEndMs = null) {
 }
 
 function resetXAxisToVisibleRange(chart, data, visibleStartMs = null, visibleEndMs = null) {
-  const series = chart?.get?.("main") ?? chart?.series?.[0];
-  const seriesX = series?.xData || series?.processedXData || [];
-  const firstFromSeries = Number.isFinite(seriesX[0]) ? seriesX[0] : data?.[0]?.t;
-  const lastFromSeries = seriesX.length ? seriesX[seriesX.length - 1] : undefined;
-  const lastFromData = Number.isFinite(lastFromSeries) ? lastFromSeries : data?.[data.length - 1]?.t;
-  const first = Number.isFinite(visibleStartMs) && Number.isFinite(firstFromSeries)
-    ? Math.max(visibleStartMs, firstFromSeries)
-    : firstFromSeries;
-  const last = Number.isFinite(visibleEndMs) && Number.isFinite(lastFromData)
-    ? Math.min(visibleEndMs, lastFromData)
-    : lastFromData;
-  const xAxis = chart?.xAxis?.[0];
-  if (!Number.isFinite(first) || !Number.isFinite(last) || !xAxis) return;
+  const range = getVisibleRangeExtremes(chart, data, visibleStartMs, visibleEndMs);
+  if (!range) return;
+  const { first, last, xAxis } = range;
 
   try {
     if (xAxis.options) {
@@ -651,6 +641,47 @@ function resetXAxisToVisibleRange(chart, data, visibleStartMs = null, visibleEnd
       navAxis.setExtremes(first, last, false, false);
     }
   } catch { /* ignore range reset failures */ }
+}
+
+function getVisibleRangeExtremes(chart, data, visibleStartMs = null, visibleEndMs = null) {
+  const series = chart?.get?.("main") ?? chart?.series?.[0];
+  const seriesX = series?.xData || series?.processedXData || [];
+  const firstFromSeries = Number.isFinite(seriesX[0]) ? seriesX[0] : data?.[0]?.t;
+  const lastFromSeries = seriesX.length ? seriesX[seriesX.length - 1] : undefined;
+  const lastFromData = Number.isFinite(lastFromSeries) ? lastFromSeries : data?.[data.length - 1]?.t;
+  const first = Number.isFinite(visibleStartMs) && Number.isFinite(firstFromSeries)
+    ? Math.max(visibleStartMs, firstFromSeries)
+    : firstFromSeries;
+  const last = Number.isFinite(visibleEndMs) && Number.isFinite(lastFromData)
+    ? Math.min(visibleEndMs, lastFromData)
+    : lastFromData;
+  const xAxis = chart?.xAxis?.[0];
+  if (!Number.isFinite(first) || !Number.isFinite(last) || !xAxis) return null;
+  return { first, last, xAxis };
+}
+
+function isShowingFullVisibleRange(chart, data, visibleStartMs = null, visibleEndMs = null) {
+  const range = getVisibleRangeExtremes(chart, data, visibleStartMs, visibleEndMs);
+  if (!range) return false;
+  const { first, last, xAxis } = range;
+  if (!Number.isFinite(xAxis.min) || !Number.isFinite(xAxis.max)) return true;
+  const span = Math.max(1, last - first);
+  const tolerance = Math.max(1, span * 0.002);
+  return Math.abs(xAxis.min - first) <= tolerance && Math.abs(xAxis.max - last) <= tolerance;
+}
+
+function getCurrentXAxisRange(chart) {
+  const xAxis = chart?.xAxis?.[0];
+  if (!Number.isFinite(xAxis?.min) || !Number.isFinite(xAxis?.max)) return null;
+  return { min: xAxis.min, max: xAxis.max };
+}
+
+function restoreXAxisRange(chart, range) {
+  const xAxis = chart?.xAxis?.[0];
+  if (!xAxis || !Number.isFinite(range?.min) || !Number.isFinite(range?.max)) return;
+  try {
+    xAxis.setExtremes(range.min, range.max, false, false);
+  } catch { /* ignore user range restore failures */ }
 }
 
 function updateNavigatorVisibleData(chart, data, visibleStartMs = null, visibleEndMs = null) {
@@ -727,11 +758,12 @@ const CandleChart = forwardRef(function CandleChart({
 
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || !data?.length) return;
-    updateNavigatorVisibleData(chart, data, visibleStartMs, visibleEndMs);
-    resetXAxisToVisibleRange(chart, data, visibleStartMs, visibleEndMs);
+    const currentData = dataRef.current;
+    if (!chart || !currentData?.length) return;
+    updateNavigatorVisibleData(chart, currentData, visibleStartMs, visibleEndMs);
+    resetXAxisToVisibleRange(chart, currentData, visibleStartMs, visibleEndMs);
     chart.redraw(false);
-  }, [data, visibleStartMs, visibleEndMs]);
+  }, [visibleStartMs, visibleEndMs]);
 
 
 
@@ -1297,6 +1329,12 @@ const CandleChart = forwardRef(function CandleChart({
     const sameLength = prev && prev.length === data.length;
     const sameSecondLast = sameLength && data.length >= 2 && prev[prev.length - 2]?.t === data[data.length - 2]?.t;
     const lastBucketSame = sameLength && prev[prev.length - 1]?.t === data[data.length - 1]?.t;
+    const shouldFollowFullRange = !prev || isShowingFullVisibleRange(
+      chart,
+      prev,
+      visibleStartRef.current,
+      visibleEndRef.current,
+    );
 
     // Viewport preservation rule (per user request — keep it simple):
     //   • prev === null  → first frame after (re)mount: snap to full range.
@@ -1316,13 +1354,18 @@ const CandleChart = forwardRef(function CandleChart({
       const lastNew = data[data.length - 1];
       const lastPoint = mainSeries.data[mainSeries.data.length - 1];
       if (lastPoint?.update) {
+        const preservedRange = shouldFollowFullRange ? null : getCurrentXAxisRange(chart);
         lastPoint.update(
           { x: lastNew.t, open: lastNew.o, high: lastNew.h, low: lastNew.l, close: lastNew.c },
           false,
           false,
         );
         updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
-        resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
+        if (shouldFollowFullRange) {
+          resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
+        } else {
+          restoreXAxisRange(chart, preservedRange);
+        }
         chart.redraw(false);
         prevDataRef.current = data;
         return;
@@ -1340,6 +1383,7 @@ const CandleChart = forwardRef(function CandleChart({
       mainSeries.data?.length === prev.length;
     if (isAppendOne) {
       try {
+        const preservedRange = shouldFollowFullRange ? null : getCurrentXAxisRange(chart);
         // Finalize the previous in-progress bar with its closing OHLC values.
         const prevFinal = data[data.length - 2];
         const prevPoint = mainSeries.data[mainSeries.data.length - 1];
@@ -1360,7 +1404,11 @@ const CandleChart = forwardRef(function CandleChart({
           false,
         );
         updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
-        resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
+        if (shouldFollowFullRange) {
+          resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
+        } else {
+          restoreXAxisRange(chart, preservedRange);
+        }
         chart.redraw(false);
         prevDataRef.current = data;
         return;
@@ -1377,6 +1425,7 @@ const CandleChart = forwardRef(function CandleChart({
     //   B. We already have a prev frame (history-prepend on left-scroll, or a
     //      large REST refresh that didn't match the fast paths): preserve the
     //      user's current viewport, clamped to the new data range.
+    const preservedRange = shouldFollowFullRange ? null : getCurrentXAxisRange(chart);
     mainSeries.setData(mapCandles(data), false, false, false);
     updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
     const dataFirst = data[0]?.t;
@@ -1389,7 +1438,11 @@ const CandleChart = forwardRef(function CandleChart({
       : dataLast;
     if (Number.isFinite(dataFirst) && Number.isFinite(dataLast)) {
       try {
-        resetXAxisToVisibleRange(chart, data, visibleFirst, visibleLast);
+        if (shouldFollowFullRange) {
+          resetXAxisToVisibleRange(chart, data, visibleFirst, visibleLast);
+        } else {
+          restoreXAxisRange(chart, preservedRange);
+        }
       } catch { /* ignore axis reset failures */ }
     }
     chart.redraw(false);
