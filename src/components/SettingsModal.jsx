@@ -381,6 +381,38 @@ export default function SettingsModal({ open, onClose }) {
           />
         </div>
 
+        {/* Section: Chart layout — escape hatch for stuck/blank indicator panes */}
+        <div className="px-4 py-2 border-t border-[var(--border)]">
+          <div className="flex items-center justify-between gap-3 py-1">
+            <div className="flex flex-col">
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[var(--text-primary)]">
+                Reset chart layout
+              </span>
+              <span className="font-mono text-[9px] text-[var(--text-dim)]">
+                Clears all indicators, chart type, and pane layout. Use this if a volume-based indicator
+                (like OBV / VWAP / MFI) leaves a blank pane on an FX chart that you can't remove.
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                try {
+                  localStorage.removeItem("fx_indicators");
+                  localStorage.removeItem("fx_chart_type");
+                } catch { /* ignore */ }
+                // Hard reload so the in-memory Highcharts state is gone too —
+                // just clearing localStorage isn't enough because the live
+                // chart still has the indicator series + axis attached.
+                window.location.reload();
+              }}
+              className="shrink-0 rounded border border-[var(--red)]/40 bg-[var(--red)]/10 px-3 py-1.5
+                         font-mono text-[10px] font-semibold uppercase tracking-wider text-[var(--red)]
+                         hover:bg-[var(--red)]/20 hover:border-[var(--red)]"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
         {/* Footer */}
         <div className="flex items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-3">
           <button

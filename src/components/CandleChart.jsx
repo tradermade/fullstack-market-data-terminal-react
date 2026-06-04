@@ -210,6 +210,116 @@ const ALLOWED_CHART_TYPES = new Set([
   "candlestick", "ohlc", "line", "area", "spline", "areaspline", "column",
 ]);
 
+const INDICATOR_STORAGE_KEY = "fx_indicators";
+
+function isMainPriceSeries(series, index = -1) {
+  const opts = series?.options || series || {};
+  const user = series?.userOptions || {};
+  const id = opts.id ?? user.id;
+  return (
+    id === "main" ||
+    index === 0
+  );
+}
+
+function cleanAxisOptions(axisOptions) {
+  const clean = { ...(axisOptions || {}) };
+  delete clean.min;
+  delete clean.max;
+  delete clean.dataMin;
+  delete clean.dataMax;
+  return clean;
+}
+
+function stripRuntimePosition(cfg) {
+  if (!cfg || typeof cfg !== "object") return cfg;
+  const rest = { ...cfg };
+  delete rest.value;
+  delete rest.from;
+  delete rest.to;
+  delete rest.x;
+  delete rest.y;
+  return rest;
+}
+
+function buildGlobalIndicatorOptions(chart) {
+  if (!chart || !chart.renderer) return null;
+  const mainSeries = chart.get?.("main") ?? chart.series?.[0];
+  if (!mainSeries) return null;
+
+  const globalInds = { series: [], yAxis: [] };
+
+  if (chart.series?.length) {
+    globalInds.series = chart.series
+      .map((series, index) => {
+        const opts = { ...(series.userOptions || series.options || {}) };
+        if (
+          isMainPriceSeries(series, index) ||
+          opts.id === "navigator-series" ||
+          opts.isInternal ||
+          series.options?.isInternal
+        ) {
+          return null;
+        }
+
+        delete opts.data;
+        delete opts.isInternal;
+        if (!opts.linkedTo && series.linkedParent === mainSeries) {
+          opts.linkedTo = "main";
+        }
+        return opts;
+      })
+      .filter(Boolean);
+  }
+
+  if (chart.yAxis?.length) {
+    const allY = getOptions(chart.yAxis).map(cleanAxisOptions);
+    globalInds.yAxis = allY.length > 1 ? allY.slice(1) : [];
+
+    const mainY = allY[0];
+    if (mainY) {
+      const mainLayout = {};
+      if (mainY.top != null) mainLayout.top = mainY.top;
+      if (mainY.height != null) mainLayout.height = mainY.height;
+      if (mainY.resize) mainLayout.resize = mainY.resize;
+      if (Object.keys(mainLayout).length > 0) {
+        globalInds.mainYAxisLayout = mainLayout;
+      }
+    }
+  }
+
+  if (chart.yAxis?.[0]) {
+    const mainY = chart.yAxis[0];
+    const cpi = mainY.options?.currentPriceIndicator;
+    if (cpi) {
+      globalInds.currentPriceIndicator = stripRuntimePosition(cpi);
+    }
+    if (mainSeries?.options?.lastPrice) {
+      globalInds.lastPrice = stripRuntimePosition(mainSeries.options.lastPrice);
+    }
+    if (mainSeries?.options?.lastVisiblePrice) {
+      globalInds.lastVisiblePrice = stripRuntimePosition(mainSeries.options.lastVisiblePrice);
+    }
+  }
+
+  if (globalInds.series.length === 0) {
+    globalInds.yAxis = [];
+    delete globalInds.mainYAxisLayout;
+  }
+
+  return globalInds;
+}
+
+function getIndicatorSignature(chart) {
+  const globalInds = buildGlobalIndicatorOptions(chart);
+  if (!globalInds) return null;
+  return JSON.stringify({
+    series: globalInds.series,
+    yAxis: globalInds.yAxis,
+    mainYAxisLayout: globalInds.mainYAxisLayout ?? null,
+  });
+}
+
 function loadGlobalChartType() {
   try {
     const raw = localStorage.getItem(CHART_TYPE_KEY);
@@ -269,9 +379,22 @@ function makeTypeToggleBindings() {
   };
 }
 
-function saveGlobalIndicators(chart) {
+function saveGlobalIndicators(chart, options = {}) {
   try {
+    if (options.guarded) return savePersistedIndicators(chart, options);
     if (!chart) return;
+    // Bail-out 1: chart has been destroyed. After Highcharts.destroy() the
+    // chart object reference still exists (a stale setTimeout closure can
+    // hold it), but `chart.renderer` is nulled out. Saving here would
+    // serialise an empty series array and clobber real indicators that the
+    // user just added on a different symbol.
+    if (!chart.renderer) return;
+    // Bail-out 2: chart is alive but the main price series isn't there yet
+    // (Highcharts mid-construction, or some edge case). Saving an "empty"
+    // result here would also clobber the real saved indicators.
+    const hasMain = chart.series?.some?.((s) => s?.options?.id === "main");
+    if (!hasMain) return;
+
     const globalInds = { series: [], yAxis: [] };
 
     if (chart.series?.length) {
@@ -286,6 +409,22 @@ function saveGlobalIndicators(chart) {
     if (chart.yAxis?.length) {
       const allY = getOptions(chart.yAxis);
       globalInds.yAxis = allY.length > 1 ? allY.slice(1) : [];
+
+      // Also persist the MAIN price yAxis layout (top/height/resize). When an
+      // indicator is added via stock-tools, Highcharts shrinks yAxis[0] (e.g.
+      // to height 60%) and adds a drag-resize handle. Without saving this,
+      // the next chart restores indicators at top:60% but yAxis[0] is back
+      // at full height, so they overlap with no visible separator.
+      const mainY = allY[0];
+      if (mainY) {
+        const mainLayout = {};
+        if (mainY.top != null) mainLayout.top = mainY.top;
+        if (mainY.height != null) mainLayout.height = mainY.height;
+        if (mainY.resize) mainLayout.resize = mainY.resize;
+        if (Object.keys(mainLayout).length > 0) {
+          globalInds.mainYAxisLayout = mainLayout;
+        }
+      }
     }
 
     // Persist currentPriceIndicator / lastPrice STYLES only — strip any
@@ -317,9 +456,38 @@ function saveGlobalIndicators(chart) {
       }
     }
 
+    // Consistency check: if we ended up with NO indicator series, drop the
+    // indicator yAxis panes and main-pane-shrink layout too. Otherwise we'd
+    // persist an "orphan pane" — a yAxis with no series in it — which on
+    // every new chart squashes the price pane to make room for empty space.
+    // This happens when Highcharts removes a series via the Edit popup but
+    // doesn't immediately clean up the associated yAxis.
+    if (globalInds.series.length === 0) {
+      globalInds.yAxis = [];
+      delete globalInds.mainYAxisLayout;
+    }
+
     localStorage.setItem("fx_indicators", JSON.stringify(globalInds));
   } catch (e) {
     console.warn("saveGlobalIndicators failed:", e);
+  }
+}
+
+function savePersistedIndicators(chart, { allowEmpty = false } = {}) {
+  try {
+    const globalInds = buildGlobalIndicatorOptions(chart);
+    if (!globalInds) return false;
+
+    if (!allowEmpty && globalInds.series.length === 0) {
+      const previous = loadGlobalIndicators();
+      if (previous?.series?.length) return false;
+    }
+
+    localStorage.setItem(INDICATOR_STORAGE_KEY, JSON.stringify(globalInds));
+    return true;
+  } catch (e) {
+    console.warn("savePersistedIndicators failed:", e);
+    return false;
   }
 }
 
@@ -328,10 +496,17 @@ function saveChartOptions(symbol, chart) {
     if (!chart || !symbol) return;
 
     const userOptions = Object.assign({}, chart.userOptions);
-
-    if (chart.annotations?.length) {
-      userOptions.annotations = getOptions(chart.annotations);
+    // Never persist the visible x-axis/navigator range. Saved chart layouts
+    // should restore drawings/style only; every fresh chart load should open
+    // at the full loaded data range.
+    delete userOptions.xAxis;
+    delete userOptions.navigator;
+    if (userOptions.rangeSelector) {
+      userOptions.rangeSelector = { ...userOptions.rangeSelector };
+      delete userOptions.rangeSelector.selected;
     }
+
+    userOptions.annotations = chart.annotations?.length ? getOptions(chart.annotations) : [];
 
     if (chart.series?.length) {
       const allSeries = getOptions(chart.series).map(s => {
@@ -339,16 +514,7 @@ function saveChartOptions(symbol, chart) {
         delete cloned.data;
         return cloned;
       });
-      userOptions.series = allSeries.filter(s => s.id === "main" || s.id === "navigator-series" || s.isInternal || s.type === "candlestick");
-    }
-
-    if (chart.xAxis?.length) {
-      userOptions.xAxis = getOptions(chart.xAxis).map(x => {
-        const clean = { ...x };
-        delete clean.min;
-        delete clean.max;
-        return clean;
-      });
+      userOptions.series = allSeries.filter(s => s.id === "main" || s.type === "candlestick");
     }
 
     if (chart.yAxis?.length) {
@@ -356,6 +522,12 @@ function saveChartOptions(symbol, chart) {
         const clean = { ...y };
         delete clean.min;
         delete clean.max;
+        delete clean.userMin;
+        delete clean.userMax;
+        delete clean.dataMin;
+        delete clean.dataMax;
+        delete clean.oldMin;
+        delete clean.oldMax;
         return clean;
       });
       // Main chart configuration exclusively saves its own central price axis pane
@@ -370,7 +542,7 @@ function saveChartOptions(symbol, chart) {
 
 function loadGlobalIndicators() {
   try {
-    const raw = localStorage.getItem("fx_indicators");
+    const raw = localStorage.getItem(INDICATOR_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
@@ -381,27 +553,37 @@ function loadChartOptions(symbol) {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed) {
-      if (Array.isArray(parsed.xAxis)) {
-        parsed.xAxis = parsed.xAxis.map(x => {
-          const clean = { ...x };
-          delete clean.min;
-          delete clean.max;
-          return clean;
-        });
-      } else if (parsed.xAxis) {
-        delete parsed.xAxis.min;
-        delete parsed.xAxis.max;
+      delete parsed.xAxis;
+      delete parsed.navigator;
+      if (parsed.rangeSelector) {
+        parsed.rangeSelector = { ...parsed.rangeSelector };
+        delete parsed.rangeSelector.selected;
+      }
+      if (Array.isArray(parsed.series)) {
+        parsed.series = parsed.series.filter((s, index) => index === 0 || s?.id === "main");
       }
       if (Array.isArray(parsed.yAxis)) {
         parsed.yAxis = parsed.yAxis.map(y => {
           const clean = { ...y };
           delete clean.min;
           delete clean.max;
+          delete clean.userMin;
+          delete clean.userMax;
+          delete clean.dataMin;
+          delete clean.dataMax;
+          delete clean.oldMin;
+          delete clean.oldMax;
           return clean;
         });
       } else if (parsed.yAxis) {
         delete parsed.yAxis.min;
         delete parsed.yAxis.max;
+        delete parsed.yAxis.userMin;
+        delete parsed.yAxis.userMax;
+        delete parsed.yAxis.dataMin;
+        delete parsed.yAxis.dataMax;
+        delete parsed.yAxis.oldMin;
+        delete parsed.yAxis.oldMax;
       }
     }
     return parsed;
@@ -410,6 +592,78 @@ function loadChartOptions(symbol) {
 
 function mapCandles(data) {
   return data.map((d) => [d.t, d.o, d.h, d.l, d.c]);
+}
+
+function mapNavigatorCandles(data) {
+  return data.map((d) => [d.t, d.c]);
+}
+
+function visibleCandles(data, visibleStartMs = null, visibleEndMs = null) {
+  const start = Number.isFinite(visibleStartMs) ? visibleStartMs : null;
+  const end = Number.isFinite(visibleEndMs) ? visibleEndMs : null;
+  const visible = (data || []).filter((bar) => (
+    Number.isFinite(bar?.t) &&
+    (start == null || bar.t >= start) &&
+    (end == null || bar.t <= end)
+  ));
+  return visible.length ? visible : data;
+}
+
+function resetXAxisToVisibleRange(chart, data, visibleStartMs = null, visibleEndMs = null) {
+  const series = chart?.get?.("main") ?? chart?.series?.[0];
+  const seriesX = series?.xData || series?.processedXData || [];
+  const firstFromSeries = Number.isFinite(seriesX[0]) ? seriesX[0] : data?.[0]?.t;
+  const lastFromSeries = seriesX.length ? seriesX[seriesX.length - 1] : undefined;
+  const lastFromData = Number.isFinite(lastFromSeries) ? lastFromSeries : data?.[data.length - 1]?.t;
+  const first = Number.isFinite(visibleStartMs) && Number.isFinite(firstFromSeries)
+    ? Math.max(visibleStartMs, firstFromSeries)
+    : firstFromSeries;
+  const last = Number.isFinite(visibleEndMs) && Number.isFinite(lastFromData)
+    ? Math.min(visibleEndMs, lastFromData)
+    : lastFromData;
+  const xAxis = chart?.xAxis?.[0];
+  if (!Number.isFinite(first) || !Number.isFinite(last) || !xAxis) return;
+
+  try {
+    if (xAxis.options) {
+      delete xAxis.options.min;
+      delete xAxis.options.max;
+    }
+    xAxis.setExtremes(first, last, false, false);
+    const navigatorAxes = [
+      chart?.navigator?.xAxis,
+      chart?.xAxis?.[1],
+    ].filter((axis) => axis && axis !== xAxis);
+    navigatorAxes.forEach((axis) => {
+      if (axis.options) {
+        delete axis.options.min;
+        delete axis.options.max;
+      }
+      axis.setExtremes(first, last, false, false);
+    });
+    const navigatorSeries = chart?.navigator?.series?.[0];
+    if (navigatorSeries?.xAxis) {
+      const navAxis = navigatorSeries.xAxis;
+      if (navAxis.options) {
+        delete navAxis.options.min;
+        delete navAxis.options.max;
+      }
+      navAxis.setExtremes(first, last, false, false);
+    }
+  } catch { /* ignore range reset failures */ }
+}
+
+function updateNavigatorVisibleData(chart, data, visibleStartMs = null, visibleEndMs = null) {
+  const navigatorSeries = chart?.navigator?.series?.[0];
+  if (!navigatorSeries?.setData) return;
+  try {
+    navigatorSeries.setData(
+      mapNavigatorCandles(visibleCandles(data, visibleStartMs, visibleEndMs)),
+      false,
+      false,
+      false,
+    );
+  } catch { /* ignore navigator update failures */ }
 }
 
 function formatFinitePrice(value, decimals) {
@@ -427,19 +681,57 @@ function makeCrosshairLabelFormatter(decimals) {
 }
 
 /* ── Component ───────────────────────────────────────────────────────────── */
-const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5, onReady }, ref) {
+// Indicators that require a volume column. TraderMade FX / metals / energies /
+// indices feeds carry no volume, so these can't compute and they leave behind
+// an empty pane the user can't remove via the Edit popup. We hide them from
+// the indicator-picker popup when the active market doesn't carry volume.
+const VOLUME_INDICATOR_NAME_KEYWORDS = [
+  "volume",       // OBV, VBP, VWAP, VW-MACD
+  "money flow",   // MFI, Chaikin Money Flow
+  "chaikin",      // Chaikin Oscillator (also covers Chaikin Money Flow)
+  "klinger",      // Klinger Oscillator
+  "accumulation", // Accumulation / Distribution
+];
+
+function isVolumeIndicatorLabel(text) {
+  if (!text) return false;
+  const lower = String(text).toLowerCase().trim();
+  return VOLUME_INDICATOR_NAME_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+const CandleChart = forwardRef(function CandleChart({
+  data,
+  symbol,
+  decimals = 5,
+  onReady,
+  marketHasVolume = true,
+  visibleStartMs = null,
+  visibleEndMs = null,
+}, ref) {
   const containerRef = useRef(null);
   const chartRef     = useRef(null);
   const symbolRef    = useRef(symbol);
   const dataRef      = useRef(data);
   const prevDataRef  = useRef(null);
   const onReadyRef   = useRef(onReady);
+  const visibleStartRef = useRef(visibleStartMs);
+  const visibleEndRef = useRef(visibleEndMs);
   const [themeVersion, setThemeVersion] = useState(0);
   const dataReady = Boolean(data?.length);
 
   useEffect(() => { symbolRef.current = symbol; }, [symbol]);
   useEffect(() => { dataRef.current = data; }, [data]);
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
+  useEffect(() => { visibleStartRef.current = visibleStartMs; }, [visibleStartMs]);
+  useEffect(() => { visibleEndRef.current = visibleEndMs; }, [visibleEndMs]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !data?.length) return;
+    updateNavigatorVisibleData(chart, data, visibleStartMs, visibleEndMs);
+    resetXAxisToVisibleRange(chart, data, visibleStartMs, visibleEndMs);
+    chart.redraw(false);
+  }, [data, visibleStartMs, visibleEndMs]);
 
 
 
@@ -456,7 +748,13 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     },
     resetZoom: () => {
       if (chartRef.current) {
-        chartRef.current.xAxis[0].setExtremes(null, null);
+        resetXAxisToVisibleRange(
+          chartRef.current,
+          dataRef.current,
+          visibleStartRef.current,
+          visibleEndRef.current,
+        );
+        chartRef.current.redraw(false);
       }
     }
   }));
@@ -476,6 +774,11 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     }
 
     const mappedData = mapCandles(dataRef.current);
+    const navigatorData = mapNavigatorCandles(visibleCandles(
+      dataRef.current,
+      visibleStartMs,
+      visibleEndMs,
+    ));
     const T = getThemeTokens();
     const crosshairLabelFormatter = makeCrosshairLabelFormatter(decimals);
 
@@ -491,6 +794,7 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
         options.series[0] = { type: "candlestick", id: "main", name: symbol };
       }
       options.series[0].data = mappedData;
+      options.series[0].showInNavigator = false;
       // Highcharts natively re-attaches the axes and overlays from `options` smoothly
     } else {
       // Fallback native fresh configuration
@@ -513,7 +817,7 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
           maskFill: "rgba(59,130,246,0.1)",
           outlineColor: T.border,
           handles: { backgroundColor: T.bgCard, borderColor: T.border },
-          series: { color: T.blue, lineWidth: 1 },
+          series: { color: T.blue, lineWidth: 1, data: navigatorData },
           xAxis: {
             gridLineColor: T.bgCard,
             labels: { style: { color: T.textDim, fontSize: "9px", fontFamily: T.mono } },
@@ -613,6 +917,7 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
           name: "Price",
           id: "main",
           data: mappedData,
+          showInNavigator: false,
           dataGrouping: { enabled: false },
           lastPrice: {
             enabled: true,
@@ -634,6 +939,17 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
       };
     }
 
+    options.navigator = {
+      ...(options.navigator || {}),
+      adaptToUpdatedData: false,
+      baseSeries: null,
+      series: {
+        ...(options.navigator?.series || {}),
+        type: "line",
+        data: navigatorData,
+      },
+    };
+
     // Blend in the global indicators perfectly over any setup
     // Strip stale per-chart numeric positions from persisted price-line configs.
     // Without this, switching symbols can carry the previous symbol's last-price
@@ -652,8 +968,37 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
 
     const globalInds = loadGlobalIndicators();
     if (globalInds) {
+      // Sanitise orphan-pane state. If a previous (buggy) save persisted a
+      // yAxis or main-shrink without any indicator series, ignore those
+      // layout pieces so the price pane uses the full height instead of
+      // being squashed for an indicator that no longer exists.
+      if (!globalInds.series?.length) {
+        globalInds.yAxis = [];
+        delete globalInds.mainYAxisLayout;
+      }
+
+      // Normalise options.yAxis into an array we can mutate in place.
+      if (!Array.isArray(options.yAxis)) {
+        options.yAxis = options.yAxis ? [options.yAxis] : [];
+      }
+
+      // Apply the saved MAIN price yAxis layout (top/height/resize) BEFORE
+      // appending indicator panes. This is what restores the drag-handle
+      // separator between price and indicator panes — without it the main
+      // pane defaults to full height and visually overlaps the indicators.
+      if (globalInds.mainYAxisLayout && options.yAxis[0]) {
+        Object.assign(options.yAxis[0], globalInds.mainYAxisLayout);
+      } else if (globalInds.yAxis?.length && options.yAxis[0]) {
+        // Backwards-compat: if we have indicator panes but no saved main
+        // layout (older fx_indicators blob), apply a sane default based on
+        // how many indicator panes there are so they don't overlap.
+        const indicatorCount = globalInds.yAxis.length;
+        const mainHeightPercent = Math.max(40, 100 - indicatorCount * 25);
+        options.yAxis[0].height = `${mainHeightPercent}%`;
+        options.yAxis[0].resize = { enabled: true };
+      }
+
       if (globalInds.yAxis?.length) {
-        if (!Array.isArray(options.yAxis)) options.yAxis = options.yAxis ? [options.yAxis] : [];
         options.yAxis = [...options.yAxis, ...globalInds.yAxis];
       }
       if (globalInds.series?.length) {
@@ -689,6 +1034,11 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     const globalType = loadGlobalChartType();
     if (Array.isArray(options.series) && options.series[0] && globalType) {
       options.series[0].type = globalType;
+      // Force id="main" on the price series. Saved per-symbol layouts from
+      // earlier versions sometimes didn't preserve this id, which broke our
+      // saveGlobalIndicators hasMain guard and silently disabled the entire
+      // indicator-persist mechanism.
+      options.series[0].id = "main";
     }
 
     // Override the stock-tools type-change bindings so clicking an active
@@ -725,33 +1075,164 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     //   - Drawings / annotations: ONLY saved on explicit Save button click
     if (!options.chart) options.chart = {};
     if (!options.chart.events) options.chart.events = {};
-    options.chart.events.render = function () {
-      const c = this;
-      clearTimeout(c._indTimer);
-      c._indTimer = setTimeout(() => {
-        saveGlobalIndicators(c);
-        // Also capture the current main-series type. If the user toggled
-        // candlestick→line from the stock-tools toolbar, this is the moment
-        // we notice and persist it for every other chart.
+
+    // Helper used by every auto-save trigger below.
+    const flushAutoSave = (c, { allowEmpty = false } = {}) => {
+      try {
+        const saved = saveGlobalIndicators(c, { allowEmpty, guarded: true });
+        if (saved) {
+          c._tmLastIndicatorSignature = getIndicatorSignature(c);
+        }
         const mainType = c.series?.[0]?.options?.type;
         if (mainType) saveGlobalChartType(mainType);
-      }, 1000);
+      } catch (e) {
+        console.warn("auto-save failed:", e);
+      }
+    };
+
+    const persistAnnotationsAfterMutation = (c) => {
+      if (!c) return;
+      clearTimeout(c._tmAnnotationPersistTimer);
+      c._tmAnnotationPersistTimer = setTimeout(() => {
+        saveChartOptions(symbolRef.current, c);
+      }, 0);
+    };
+
+    const bindAnnotationRemovePersistence = (c) => {
+      if (!c?.annotations?.length || !Highcharts.addEvent) return;
+      c.annotations.forEach((annotation) => {
+        if (!annotation || annotation._tmRemovePersistenceBound) return;
+        annotation._tmRemovePersistenceBound = true;
+        Highcharts.addEvent(annotation, "remove", () => {
+          persistAnnotationsAfterMutation(c);
+        });
+      });
+    };
+
+    // Trigger 1: chart render. Debounced because renders fire constantly on
+    // live charts (every tick → redraw → render). The debounce is short
+    // enough that quiet periods between ticks let it fire, but if ticks are
+    // continuous (e.g. BTCUSD live), this may NEVER fire — see trigger 2
+    // and the cleanup flush, which are the real safety net.
+    options.chart.events.render = function () {
+      const c = this;
+      bindAnnotationRemovePersistence(c);
+      if (!c._tmIndicatorPersistenceReady) return;
+      const signature = getIndicatorSignature(c);
+      if (signature == null || signature === c._tmLastIndicatorSignature) return;
+      c._tmIndicatorsTouched = true;
+      c._tmLastIndicatorSignature = signature;
+      clearTimeout(c._indTimer);
+      c._indTimer = setTimeout(() => flushAutoSave(c, { allowEmpty: true }), 100);
+    };
+
+    // Trigger 2: a series was added (almost always means the user just
+    // added an indicator via the stock-tools popup). Save immediately —
+    // don't depend on the render debounce, which can be starved by ticks.
+    options.chart.events.addSeries = function () {
+      const c = this;
+      if (!c._tmIndicatorPersistenceReady) return;
+      c._tmIndicatorsTouched = true;
+      // Defer one tick so Highcharts finishes wiring up the new series
+      // (yAxis linkage, computed data, etc.) before we serialise.
+      setTimeout(() => flushAutoSave(c, { allowEmpty: true }), 50);
+    };
+
+    options.chart.events.afterAddSeries = function () {
+      const c = this;
+      if (!c._tmIndicatorPersistenceReady) return;
+      c._tmIndicatorsTouched = true;
+      setTimeout(() => flushAutoSave(c, { allowEmpty: true }), 50);
     };
 
     let disposed = false;
     let readyFrame = 0;
+    let volumeIndicatorObserver = null;
 
     try {
       chartRef.current = Highcharts.stockChart(el, options);
-      const first = dataRef.current[0]?.t;
-      const last = dataRef.current[dataRef.current.length - 1]?.t;
-      if (first != null && last != null && chartRef.current?.xAxis?.[0]) {
-        chartRef.current.xAxis[0].setExtremes(first, last, false, false);
-        chartRef.current.redraw(false);
+      const initialIndicatorSignature = getIndicatorSignature(chartRef.current);
+      chartRef.current._tmInitialIndicatorSignature = initialIndicatorSignature;
+      chartRef.current._tmLastIndicatorSignature = initialIndicatorSignature;
+      chartRef.current._tmIndicatorsTouched = false;
+      chartRef.current._tmIndicatorPersistenceReady = true;
+      bindAnnotationRemovePersistence(chartRef.current);
+
+      // Hide volume-based indicators from the picker popup when the active
+      // market has no volume data (FX / metals / energies / indices). A
+      // MutationObserver is used because the popup is added / removed from
+      // the DOM each time it's shown, and the indicator list inside it is
+      // re-rendered when the user toggles between Add and Edit tabs.
+      if (!marketHasVolume && typeof MutationObserver !== "undefined") {
+        const applyFilter = () => {
+          const items = document.querySelectorAll(
+            ".highcharts-popup .highcharts-indicator-list-item, .highcharts-popup ul li",
+          );
+          items.forEach((item) => {
+            if (item.dataset.tmVolFiltered === "1") return;
+            const text = (item.textContent || "").trim();
+            if (isVolumeIndicatorLabel(text)) {
+              item.style.display = "none";
+              item.dataset.tmVolFiltered = "1";
+            }
+          });
+        };
+        volumeIndicatorObserver = new MutationObserver(applyFilter);
+        volumeIndicatorObserver.observe(document.body, {
+          childList: true,
+          subtree: true,
+        });
+        // Catch any popup that's already open at chart creation time.
+        applyFilter();
       }
+      resetXAxisToVisibleRange(
+        chartRef.current,
+        dataRef.current,
+        visibleStartRef.current,
+        visibleEndRef.current,
+      );
+      updateNavigatorVisibleData(
+        chartRef.current,
+        dataRef.current,
+        visibleStartRef.current,
+        visibleEndRef.current,
+      );
+      chartRef.current.redraw(false);
       prevDataRef.current = dataRef.current;
       readyFrame = requestAnimationFrame(() => {
-        if (!disposed && chartRef.current) onReadyRef.current?.();
+        if (!disposed && chartRef.current) {
+          updateNavigatorVisibleData(
+            chartRef.current,
+            dataRef.current,
+            visibleStartRef.current,
+            visibleEndRef.current,
+          );
+          resetXAxisToVisibleRange(
+            chartRef.current,
+            dataRef.current,
+            visibleStartRef.current,
+            visibleEndRef.current,
+          );
+          chartRef.current.redraw(false);
+          requestAnimationFrame(() => {
+            if (!disposed && chartRef.current) {
+              updateNavigatorVisibleData(
+                chartRef.current,
+                dataRef.current,
+                visibleStartRef.current,
+                visibleEndRef.current,
+              );
+              resetXAxisToVisibleRange(
+                chartRef.current,
+                dataRef.current,
+                visibleStartRef.current,
+                visibleEndRef.current,
+              );
+              chartRef.current.redraw(false);
+              onReadyRef.current?.();
+            }
+          });
+        }
       });
     } catch (e) {
       console.warn("Highcharts failed to init chart, possibly corrupted options", e);
@@ -762,7 +1243,42 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     return () => {
       disposed = true;
       if (readyFrame) cancelAnimationFrame(readyFrame);
+      if (volumeIndicatorObserver) {
+        try { volumeIndicatorObserver.disconnect(); } catch { /* ignore */ }
+        volumeIndicatorObserver = null;
+      }
       if (chartRef.current) {
+        // FLUSH first, THEN cancel, THEN destroy. The order matters:
+        //
+        //  1. If the user added an indicator and switched symbols within
+        //     1 second, the 1s render-debounced auto-save hasn't fired yet.
+        //     A synchronous save here captures it before we tear the chart
+        //     down — without this, fast symbol switches lose indicators.
+        //
+        //  2. Then cancel the pending timer so it doesn't fire later
+        //     against a destroyed chart and overwrite our flush with empty
+        //     (see saveGlobalIndicators' destroy-guards as a backstop).
+        //
+        //  3. Then destroy.
+        try {
+          const signature = getIndicatorSignature(chartRef.current);
+          const changed =
+            signature != null &&
+            signature !== chartRef.current._tmInitialIndicatorSignature;
+          if (changed || chartRef.current._tmIndicatorsTouched) {
+            saveGlobalIndicators(chartRef.current, { allowEmpty: true, guarded: true });
+          }
+          const mainType = chartRef.current.series?.[0]?.options?.type;
+          if (mainType) saveGlobalChartType(mainType);
+        } catch { /* ignore — destroy is more important */ }
+        if (chartRef.current._indTimer) {
+          clearTimeout(chartRef.current._indTimer);
+          chartRef.current._indTimer = null;
+        }
+        if (chartRef.current._tmAnnotationPersistTimer) {
+          clearTimeout(chartRef.current._tmAnnotationPersistTimer);
+          chartRef.current._tmAnnotationPersistTimer = null;
+        }
         try { chartRef.current.destroy(); } catch { /* ignore destroy failures */ }
         chartRef.current = null;
       }
@@ -795,24 +1311,6 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     // (e.g. after addPoint extends the data range, or after a programmatic
     // setExtremes from a previous tick). What matters is just "do we have a
     // viewport worth keeping?" — and we do iff we've already rendered once.
-    const xAxis = chart.xAxis?.[0];
-    const currentExtremes = xAxis ? xAxis.getExtremes() : null;
-    const savedMin = currentExtremes?.min;
-    const savedMax = currentExtremes?.max;
-    const hasPrevFrame = prev != null && prev.length > 0;
-
-    const restoreViewport = () => {
-      if (
-        hasPrevFrame &&
-        xAxis &&
-        Number.isFinite(savedMin) &&
-        Number.isFinite(savedMax) &&
-        savedMax > savedMin
-      ) {
-        xAxis.setExtremes(savedMin, savedMax, false, false);
-      }
-    };
-
     // Fast path: same array shape AND same final bucket → update ONLY the last candle.
     if (sameLength && sameSecondLast && lastBucketSame && mainSeries.data?.length === data.length) {
       const lastNew = data[data.length - 1];
@@ -823,7 +1321,8 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
           false,
           false,
         );
-        restoreViewport();
+        updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
+        resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
         chart.redraw(false);
         prevDataRef.current = data;
         return;
@@ -860,7 +1359,8 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
           false,
           false,
         );
-        restoreViewport();
+        updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
+        resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
         chart.redraw(false);
         prevDataRef.current = data;
         return;
@@ -878,21 +1378,18 @@ const CandleChart = forwardRef(function CandleChart({ data, symbol, decimals = 5
     //      large REST refresh that didn't match the fast paths): preserve the
     //      user's current viewport, clamped to the new data range.
     mainSeries.setData(mapCandles(data), false, false, false);
-    const first = data[0]?.t;
-    const last = data[data.length - 1]?.t;
-    if (first != null && last != null) {
+    updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
+    const dataFirst = data[0]?.t;
+    const dataLast = data[data.length - 1]?.t;
+    const visibleFirst = Number.isFinite(visibleStartRef.current) && Number.isFinite(dataFirst)
+      ? Math.max(visibleStartRef.current, dataFirst)
+      : dataFirst;
+    const visibleLast = Number.isFinite(visibleEndRef.current) && Number.isFinite(dataLast)
+      ? Math.min(visibleEndRef.current, dataLast)
+      : dataLast;
+    if (Number.isFinite(dataFirst) && Number.isFinite(dataLast)) {
       try {
-        if (hasPrevFrame && Number.isFinite(savedMin) && Number.isFinite(savedMax)) {
-          const clampedMin = Math.max(savedMin, first);
-          const clampedMax = Math.min(savedMax, last);
-          if (clampedMax > clampedMin) {
-            chart.xAxis[0].setExtremes(clampedMin, clampedMax, false, false);
-          } else {
-            chart.xAxis[0].setExtremes(first, last, false, false);
-          }
-        } else {
-          chart.xAxis[0].setExtremes(first, last, false, false);
-        }
+        resetXAxisToVisibleRange(chart, data, visibleFirst, visibleLast);
       } catch { /* ignore axis reset failures */ }
     }
     chart.redraw(false);

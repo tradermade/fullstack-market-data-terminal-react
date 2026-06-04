@@ -15,8 +15,9 @@ import { MAX_WINDOW_HOURS, DEFAULT_RANGE_HOURS } from "./TopBar.jsx";
 const MS_PER_HOUR = 3_600_000;
 const MARKET_LOOKBACK_STEP_MS = 15 * 60_000;
 const EMPTY_WINDOW_BACKTRACK_ATTEMPTS = 5;
-const CACHE_VERSION = "v5";
+const CACHE_VERSION = "v7";
 const FX_INTRADAY_MAX_HOURS = 48;
+const INDICATOR_WARMUP_BARS = 0;
 
 /* ── Cache helpers ───────────────────────────────────────────────────────── */
 const getCacheKey = (sym, tfLabel, rangeHours, anchorKey = "live") =>
@@ -45,11 +46,12 @@ const getCachedTimeseries = (sym, tfLabel, rangeHours, anchorKey) => {
   return null;
 };
 
-const setCachedTimeseries = (sym, tfLabel, rangeHours, anchorKey, data) => {
+const setCachedTimeseries = (sym, tfLabel, rangeHours, anchorKey, payload) => {
   try {
+    const next = Array.isArray(payload) ? { data: payload } : payload;
     sessionStorage.setItem(
       getCacheKey(sym, tfLabel, rangeHours, anchorKey),
-      JSON.stringify({ data, lastFetch: Date.now() })
+      JSON.stringify({ ...next, lastFetch: Date.now() })
     );
   } catch { /* ignore */ }
 };
@@ -105,6 +107,13 @@ function clampRangeForTimeframe(tfObj, hours, marketId = "CRYPTO") {
   const fallback = DEFAULT_RANGE_HOURS[tfObj.interval] ?? max;
   const clamped = Math.min(hours, max);
   return min > 0 && clamped < min ? Math.min(fallback, max) : clamped;
+}
+
+function getIndicatorWarmupHours(tfObj, rangeHours, marketId) {
+  const max = getMaxWindowHours(tfObj, marketId);
+  const room = Math.max(0, max - rangeHours);
+  if (room <= 0) return 0;
+  return Math.min(timeframeHours(tfObj) * INDICATOR_WARMUP_BARS, room);
 }
 
 function pickTimeframeForRange(currentTf, hours, marketId) {
@@ -399,6 +408,7 @@ export default function TradingPortal() {
   const setTf = (tfObj) => setTfLabel(tfObj.label);
 
   const [chartData,  setChartData]  = useState([]);
+  const [chartWindowStartMs, setChartWindowStartMs] = useState(null);
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(null);
   const [tickerOpen, setTickerOpen] = useState(false);
@@ -476,6 +486,7 @@ export default function TradingPortal() {
   useEffect(() => {
     setChartData([]);
     setChartDataSymbol(null);
+    setChartWindowStartMs(null);
     setChartReady(false);
     setLoading(true);
     setError(null);
@@ -499,6 +510,7 @@ export default function TradingPortal() {
           setChartReady(false);
           setChartData(cached.data);
           setChartDataSymbol(activeSym.sym);
+          setChartWindowStartMs(cached.visibleStartMs ?? cached.data[0]?.t ?? null);
           setLoading(false);
         }
         return;
@@ -514,6 +526,7 @@ export default function TradingPortal() {
 
         const maxH = getMaxWindowHours(tf, activeMarket.id);
         const clampedRange = Math.min(rangeHours, maxH);
+        const warmupHours = getIndicatorWarmupHours(tf, clampedRange, activeMarket.id);
         const canBacktrackEmptyWindow = !isCrypto && clampedRange <= FX_INTRADAY_MAX_HOURS;
 
         const weekendParam = isCrypto ? "&weekend=true" : "";
@@ -530,7 +543,8 @@ export default function TradingPortal() {
         let end = anchorEnd ? new Date(anchorEnd.getTime()) : new Date(now.getTime());
         if (end > now) end = new Date(now.getTime());
         end = getFetchEnd(end, activeMarket.id);
-        let start = getFetchStart(end, clampedRange, activeMarket.id);
+        let visibleStart = getFetchStart(end, clampedRange, activeMarket.id);
+        let start = getFetchStart(end, clampedRange + warmupHours, activeMarket.id);
         let newData = [];
         let lastEmptyError = "No valid quotes returned from API";
 
@@ -545,8 +559,9 @@ export default function TradingPortal() {
 
           if (!canBacktrackEmptyWindow || attempt === EMPTY_WINDOW_BACKTRACK_ATTEMPTS) break;
 
-          end = getFetchEnd(new Date(start.getTime() - 60_000), activeMarket.id);
-          start = getFetchStart(end, clampedRange, activeMarket.id);
+          end = getFetchEnd(new Date(visibleStart.getTime() - 60_000), activeMarket.id);
+          visibleStart = getFetchStart(end, clampedRange, activeMarket.id);
+          start = getFetchStart(end, clampedRange + warmupHours, activeMarket.id);
         }
 
         if (newData.length === 0) throw new Error(lastEmptyError);
@@ -555,9 +570,14 @@ export default function TradingPortal() {
           setChartReady(false);
           setChartData(newData);
           setChartDataSymbol(activeSym.sym);
+          const visibleStartMs = visibleStart.getTime();
+          setChartWindowStartMs(visibleStartMs);
           setTimeout(() => {
             if (!cancelled) {
-              setCachedTimeseries(activeSym.sym, tf.label, rangeHours, anchorKey, newData);
+              setCachedTimeseries(activeSym.sym, tf.label, rangeHours, anchorKey, {
+                data: newData,
+                visibleStartMs,
+              });
             }
           }, 0);
         }
@@ -566,6 +586,7 @@ export default function TradingPortal() {
           setError(err.message || "Failed to load chart data");
           setChartData([]);
           setChartDataSymbol(null);
+          setChartWindowStartMs(null);
           setChartReady(false);
         }
       } finally {
@@ -622,7 +643,10 @@ export default function TradingPortal() {
           }
 
           setTimeout(() => {
-            setCachedTimeseries(activeSym.sym, tf.label, rangeHours, "live", next);
+            setCachedTimeseries(activeSym.sym, tf.label, rangeHours, "live", {
+              data: next,
+              visibleStartMs: chartWindowStartMs ?? next[0]?.t ?? null,
+            });
           }, 0);
 
           return next;
@@ -632,7 +656,7 @@ export default function TradingPortal() {
 
     const id = setInterval(poll, 30_000);
     return () => clearInterval(id);
-  }, [activeSym.sym, tf, activeMarket, rangeHours, anchorEnd]);
+  }, [activeSym.sym, tf, activeMarket, rangeHours, anchorEnd, chartWindowStartMs]);
 
   /* ── Infinite history (load older candles when user drags left) ─────── */
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -739,11 +763,17 @@ export default function TradingPortal() {
     });
   }, [activeSym.sym, anchorEnd, liveTick, tf]);
 
-  const last = chartData[chartData.length - 1] ?? null;
-  const chartMounted = !error && chartData.length > 0 && chartDataSymbol === activeSym.sym;
+  const visibleChartData = useMemo(() => {
+    if (!chartWindowStartMs) return chartData;
+    const visible = chartData.filter((bar) => Number.isFinite(bar?.t) && bar.t >= chartWindowStartMs);
+    return visible.length ? visible : chartData;
+  }, [chartData, chartWindowStartMs]);
+
+  const last = visibleChartData[visibleChartData.length - 1] ?? null;
+  const chartMounted = !error && visibleChartData.length > 0 && chartDataSymbol === activeSym.sym;
   const chartRenderPending = chartMounted && !chartReady;
-  const blockingLoad = (loading && chartData.length === 0) || chartRenderPending;
-  const backgroundLoad = loading && chartData.length > 0 && !chartRenderPending;
+  const blockingLoad = (loading && visibleChartData.length === 0) || chartRenderPending;
+  const backgroundLoad = loading && visibleChartData.length > 0 && !chartRenderPending;
   const chartIdentity = `${activeMarket.id}-${activeSym.sym}-${tf.label}-${rangeHours}-${anchorEndMs ?? "live"}`;
 
   return (
@@ -770,7 +800,7 @@ export default function TradingPortal() {
           onRangeChange={handleRangeChange}
           anchorEnd={anchorEnd}
           onAnchorChange={setAnchorEnd}
-          displayWindowStart={chartData[0] ? new Date(chartData[0].t) : null}
+          displayWindowStart={visibleChartData[0] ? new Date(visibleChartData[0].t) : chartWindowStartMs ? new Date(chartWindowStartMs) : null}
           maxRangeHours={getMaxWindowHours(tf, activeMarket.id)}
           onOpenSettings={() => setSettingsOpen(true)}
         />
@@ -828,10 +858,15 @@ export default function TradingPortal() {
                   <CandleChart
                     key={chartIdentity}
                     ref={chartRef}
-                    data={chartData}
+                    data={visibleChartData}
                     chartKey={chartIdentity}
                     symbol={activeSym.sym}
                     decimals={activeSym.decimals ?? 5}
+                    visibleStartMs={chartWindowStartMs}
+                    // Only STOCKS and CRYPTO carry volume in the TraderMade feed.
+                    // FX / METALS / ENERGIES / INDICES are price-only, so we
+                    // hide volume-based indicators from the popup for those.
+                    marketHasVolume={activeMarket.id === "STOCKS" || activeMarket.id === "CRYPTO"}
                     onReady={() => setChartReady(true)}
                     onLoadMoreHistory={loadMoreHistory}
                   />

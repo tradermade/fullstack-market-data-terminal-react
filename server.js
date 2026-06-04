@@ -554,9 +554,6 @@ let tmLoggedIn = false;  // Track login status separately
 let tmHasLadder = false; // True if the account has trader_ladder enabled
 let tmReconnectTimer = null;
 let tmConnecting = false;
-let tmIntentionalClose = false;
-let idleCloseTimer = null;
-const IDLE_UNSUBSCRIBE_GRACE_MS = 2000;
 const SEND_LAST_FALLBACK_DELAY_MS = 2500;
 const clients = new Set();
 const clientSubs = new Map(); // clientWs → Set<symbol>
@@ -737,34 +734,14 @@ function hasActiveClientDemand() {
   return false;
 }
 
-function cancelIdleCloseTimer() {
-  if (!idleCloseTimer) return;
-  clearTimeout(idleCloseTimer);
-  idleCloseTimer = null;
-}
-
 function reconcileUpstreamSubscriptions() {
   desiredSymbols = collectDesiredSymbols();
   const hasDemand = desiredSymbols.size > 0;
 
   if (!hasDemand) {
-    if (!idleCloseTimer) {
-      console.log(`⏳ No client demand; waiting ${IDLE_UNSUBSCRIBE_GRACE_MS}ms before upstream unsubscribe/close...`);
-      idleCloseTimer = setTimeout(() => {
-        idleCloseTimer = null;
-        desiredSymbols = collectDesiredSymbols();
-        if (desiredSymbols.size === 0) {
-          closeUpstreamIfIdle();
-        } else {
-          console.log(`↩️ Client demand returned during grace period; keeping upstream subscriptions alive (${desiredSymbols.size} symbols)`);
-          reconcileUpstreamSubscriptions();
-        }
-      }, IDLE_UNSUBSCRIBE_GRACE_MS);
-    }
+    console.log(`⏸️ No active browser demand; keeping upstream subscriptions alive (${allSymbols.size} symbols)`);
     return;
   }
-
-  cancelIdleCloseTimer();
 
   if ((!tmWs || (tmWs.readyState !== WebSocket.OPEN && tmWs.readyState !== WebSocket.CONNECTING)) && !tmConnecting) {
     savePersistedSymbols(desiredSymbols);
@@ -792,17 +769,6 @@ function scheduleReconnect(delayMs = 3000) {
     tmReconnectTimer = null;
     connectUpstream();
   }, delayMs);
-}
-
-function closeUpstreamIfIdle() {
-  if (!tmWs || tmWs.readyState !== WebSocket.OPEN) return;
-  if (allSymbols.size > 0 && tmLoggedIn) {
-    unsubscribeUpstream(Array.from(allSymbols));
-  }
-  allSymbols = new Set();
-  savePersistedSymbols(allSymbols);
-  tmIntentionalClose = true;
-  try { tmWs.close(1000, "No active symbol demand"); } catch (_) {}
 }
 
 function connectUpstream() {
@@ -862,6 +828,9 @@ function connectUpstream() {
         tmLoggedIn = true;
         tmReady = true;
         desiredSymbols = collectDesiredSymbols();
+        if (desiredSymbols.size === 0 && allSymbols.size > 0) {
+          desiredSymbols = new Set(allSymbols);
+        }
         allSymbols = new Set();
         console.log(`🔄 Post-login demand snapshot: ${desiredSymbols.size} symbols`);
         if (desiredSymbols.size > 0) {
@@ -939,25 +908,13 @@ function connectUpstream() {
 
   ws.on("close", (code) => {
     if (tmWs !== ws) return;
-    const intentional = tmIntentionalClose;
-    tmIntentionalClose = false;
     tmConnecting = false;
     tmReady = false;
     tmLoggedIn = false;
     tmWs = null;
 
-    if (intentional) {
-      console.warn(`⚠️  TraderMade upstream closed intentionally (${code}) — idle.`);
-      return;
-    }
-
-    if (code === 1000) {
-      console.warn(`⚠️  TraderMade upstream closed normally (${code}) — not reconnecting.`);
-      return;
-    }
-
-    if (!hasActiveClientDemand()) {
-      console.warn(`⚠️  TraderMade upstream closed (${code}) with no active client demand — not reconnecting.`);
+    if (!hasActiveClientDemand() && allSymbols.size === 0) {
+      console.warn(`⚠️  TraderMade upstream closed (${code}) with no remembered symbols — not reconnecting.`);
       return;
     }
 
