@@ -1,6 +1,3 @@
-Here is the complete, fully updated `README.md` block for your GitHub repository. It keeps all of the excellent architectural details, script lists, and structural breakdowns from the Codex draft while seamlessly baking in your senior's required guidelines (explicit **Highcharts licensing transparency** and the safety guards for **weekend FX limits**).
-
-```markdown
 # TraderMade Market Terminal
 
 A self-hosted TraderMade market-data terminal built with React, Vite, Highcharts Stock, Express, and WebSockets.
