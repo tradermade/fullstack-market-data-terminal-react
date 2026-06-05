@@ -1,8 +1,8 @@
-# TraderMade Market Terminal
+# TraderMade Market Data Terminal
 
-A self-hosted TraderMade market-data terminal built with React, Vite, Highcharts Stock, Express, and WebSockets.
+A self-hosted market-data terminal built with React, Vite, Highcharts Stock, Express, and WebSockets. Ideal boilerplate code to launch a trading portal in days.
 
-The repository name still says `tradermade-fx-dashboard`, but the app is broader than FX. It supports global currency pairs, metals, energies, indices, selected US stocks, and crypto symbols from TraderMade REST and WebSocket feeds.
+The app supports global currency pairs, metals, energies, indices, selected US stocks, and crypto symbols from TraderMade REST and WebSocket feeds.
 
 ## What It Includes
 
