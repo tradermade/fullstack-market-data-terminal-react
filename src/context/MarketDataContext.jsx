@@ -140,7 +140,7 @@ function applyTick(parsed) {
   const nextState = {
     ...store.state,
     status: "Live",
-    ticks: { ...store.state.ticks, [symbol]: { ...parsed, symbol, bid, ask, mid, trend } },
+    ticks: { ...store.state.ticks, [symbol]: { ...parsed, symbol, bid, ask, mid, trend, receivedAt: Date.now() } },
   };
   // Pick out ladder/depth data when present and put it into its own slot,
   // sorted with best price first so the UI can render top-down easily.

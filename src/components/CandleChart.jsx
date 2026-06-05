@@ -110,6 +110,8 @@ function applyThemeToOptions(options, theme, decimals) {
 
   options.tooltip = {
     ...(options.tooltip || {}),
+    snap: 2,
+    stickOnContact: false,
     backgroundColor: theme.bgPanel,
     borderColor: theme.border,
     style: {
@@ -122,12 +124,17 @@ function applyThemeToOptions(options, theme, decimals) {
 
   options.plotOptions = {
     ...(options.plotOptions || {}),
+    series: {
+      ...(options.plotOptions?.series || {}),
+      stickyTracking: false,
+    },
     candlestick: {
       ...(options.plotOptions?.candlestick || {}),
       color: theme.red,
       upColor: theme.green,
       lineColor: theme.red,
       upLineColor: theme.green,
+      stickyTracking: false,
     },
   };
 
@@ -684,6 +691,31 @@ function restoreXAxisRange(chart, range) {
   } catch { /* ignore user range restore failures */ }
 }
 
+function getDataIntervalMs(data) {
+  if (!Array.isArray(data) || data.length < 2) return 60_000;
+  for (let i = data.length - 1; i > 0; i -= 1) {
+    const diff = data[i]?.t - data[i - 1]?.t;
+    if (Number.isFinite(diff) && diff > 0) return diff;
+  }
+  return 60_000;
+}
+
+function isViewingLiveEdge(chart, data) {
+  const xAxis = chart?.xAxis?.[0];
+  const last = data?.[data.length - 1]?.t;
+  if (!Number.isFinite(xAxis?.max) || !Number.isFinite(last)) return true;
+  const interval = getDataIntervalMs(data);
+  return xAxis.max >= last - interval * 1.5;
+}
+
+function shiftXAxisRange(chart, range, delta) {
+  const xAxis = chart?.xAxis?.[0];
+  if (!xAxis || !Number.isFinite(range?.min) || !Number.isFinite(range?.max) || !Number.isFinite(delta)) return;
+  try {
+    xAxis.setExtremes(range.min + delta, range.max + delta, false, false);
+  } catch { /* ignore live-edge range shift failures */ }
+}
+
 function updateNavigatorVisibleData(chart, data, visibleStartMs = null, visibleEndMs = null) {
   const navigatorSeries = chart?.navigator?.series?.[0];
   if (!navigatorSeries?.setData) return;
@@ -700,6 +732,18 @@ function updateNavigatorVisibleData(chart, data, visibleStartMs = null, visibleE
 function formatFinitePrice(value, decimals) {
   const num = Number(value);
   return Number.isFinite(num) ? num.toFixed(decimals) : "";
+}
+
+function formatUtcDateTime(timestamp) {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return "";
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = date.getUTCFullYear();
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const min = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  return `${dd}/${mm}/${yyyy}, ${hh}:${min}:${ss} UTC`;
 }
 
 function makeCrosshairLabelFormatter(decimals) {
@@ -911,6 +955,8 @@ const CandleChart = forwardRef(function CandleChart({
         },
         tooltip: {
           useHTML: true,
+          snap: 2,
+          stickOnContact: false,
           backgroundColor: T.bgPanel,
           borderColor: T.border,
           borderRadius: 8,
@@ -925,7 +971,7 @@ const CandleChart = forwardRef(function CandleChart({
           formatter() {
             const p = this.point;
             const col = p.close >= p.open ? T.green : T.red;
-            const date = new Date(this.x).toLocaleString();
+            const date = formatUtcDateTime(this.x);
             return (
               `<span style="color:${T.textDim};font-size:10px">${date}</span><br/>` +
               `<span style="color:#3a4f68">O </span><span style="color:${T.textSecondary}">${p.open?.toFixed(decimals)}</span><br/>` +
@@ -936,11 +982,15 @@ const CandleChart = forwardRef(function CandleChart({
           },
         },
         plotOptions: {
+          series: {
+            stickyTracking: false,
+          },
           candlestick: {
             color: T.red, upColor: T.green,
             lineColor: T.red, upLineColor: T.green,
             lineWidth: 1, animation: false,
             dataGrouping: { enabled: false },
+            stickyTracking: false,
             states: { hover: { brightness: 0.12 } },
           },
         },
@@ -1327,8 +1377,8 @@ const CandleChart = forwardRef(function CandleChart({
 
     const prev = prevDataRef.current;
     const sameLength = prev && prev.length === data.length;
-    const sameSecondLast = sameLength && data.length >= 2 && prev[prev.length - 2]?.t === data[data.length - 2]?.t;
-    const lastBucketSame = sameLength && prev[prev.length - 1]?.t === data[data.length - 1]?.t;
+    const sameTimestamps = sameLength && data.every((bar, index) => prev[index]?.t === bar?.t);
+    const shouldFollowLiveEdge = prev && isViewingLiveEdge(chart, prev);
     const shouldFollowFullRange = !prev || isShowingFullVisibleRange(
       chart,
       prev,
@@ -1349,17 +1399,28 @@ const CandleChart = forwardRef(function CandleChart({
     // (e.g. after addPoint extends the data range, or after a programmatic
     // setExtremes from a previous tick). What matters is just "do we have a
     // viewport worth keeping?" — and we do iff we've already rendered once.
-    // Fast path: same array shape AND same final bucket → update ONLY the last candle.
-    if (sameLength && sameSecondLast && lastBucketSame && mainSeries.data?.length === data.length) {
-      const lastNew = data[data.length - 1];
-      const lastPoint = mainSeries.data[mainSeries.data.length - 1];
-      if (lastPoint?.update) {
+    // Fast path: same timestamp layout -> update every changed candle in place.
+    if (sameTimestamps && mainSeries.data?.length === data.length) {
+      try {
         const preservedRange = shouldFollowFullRange ? null : getCurrentXAxisRange(chart);
-        lastPoint.update(
-          { x: lastNew.t, open: lastNew.o, high: lastNew.h, low: lastNew.l, close: lastNew.c },
-          false,
-          false,
-        );
+        data.forEach((bar, index) => {
+          const oldBar = prev[index];
+          if (
+            oldBar?.o === bar.o &&
+            oldBar?.h === bar.h &&
+            oldBar?.l === bar.l &&
+            oldBar?.c === bar.c
+          ) {
+            return;
+          }
+          const point = mainSeries.data[index];
+          if (!point?.update) return;
+          point.update(
+            { x: bar.t, open: bar.o, high: bar.h, low: bar.l, close: bar.c },
+            false,
+            false,
+          );
+        });
         updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
         if (shouldFollowFullRange) {
           resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
@@ -1369,6 +1430,8 @@ const CandleChart = forwardRef(function CandleChart({
         chart.redraw(false);
         prevDataRef.current = data;
         return;
+      } catch (e) {
+        console.warn("same-layout update failed, falling back to setData", e);
       }
     }
 
@@ -1384,6 +1447,7 @@ const CandleChart = forwardRef(function CandleChart({
     if (isAppendOne) {
       try {
         const preservedRange = shouldFollowFullRange ? null : getCurrentXAxisRange(chart);
+        const edgeShift = data[data.length - 1]?.t - prev[prev.length - 1]?.t;
         // Finalize the previous in-progress bar with its closing OHLC values.
         const prevFinal = data[data.length - 2];
         const prevPoint = mainSeries.data[mainSeries.data.length - 1];
@@ -1406,6 +1470,8 @@ const CandleChart = forwardRef(function CandleChart({
         updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
         if (shouldFollowFullRange) {
           resetXAxisToVisibleRange(chart, data, visibleStartRef.current, visibleEndRef.current);
+        } else if (shouldFollowLiveEdge) {
+          shiftXAxisRange(chart, preservedRange, edgeShift);
         } else {
           restoreXAxisRange(chart, preservedRange);
         }
@@ -1430,6 +1496,8 @@ const CandleChart = forwardRef(function CandleChart({
     updateNavigatorVisibleData(chart, data, visibleStartRef.current, visibleEndRef.current);
     const dataFirst = data[0]?.t;
     const dataLast = data[data.length - 1]?.t;
+    const prevLast = prev?.[prev.length - 1]?.t;
+    const edgeShift = Number.isFinite(dataLast) && Number.isFinite(prevLast) ? dataLast - prevLast : 0;
     const visibleFirst = Number.isFinite(visibleStartRef.current) && Number.isFinite(dataFirst)
       ? Math.max(visibleStartRef.current, dataFirst)
       : dataFirst;
@@ -1440,6 +1508,8 @@ const CandleChart = forwardRef(function CandleChart({
       try {
         if (shouldFollowFullRange) {
           resetXAxisToVisibleRange(chart, data, visibleFirst, visibleLast);
+        } else if (shouldFollowLiveEdge && edgeShift > 0) {
+          shiftXAxisRange(chart, preservedRange, edgeShift);
         } else {
           restoreXAxisRange(chart, preservedRange);
         }

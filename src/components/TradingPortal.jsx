@@ -13,9 +13,13 @@ import { useSharedMarketData } from "../context/MarketDataContext.jsx";
 import { MAX_WINDOW_HOURS, DEFAULT_RANGE_HOURS } from "./TopBar.jsx";
 
 const MS_PER_HOUR = 3_600_000;
+const MS_PER_DAY = 24 * MS_PER_HOUR;
 const MARKET_LOOKBACK_STEP_MS = 15 * 60_000;
 const EMPTY_WINDOW_BACKTRACK_ATTEMPTS = 5;
-const CACHE_VERSION = "v7";
+const CANDLE_CLOSE_REST_DELAY_MS = 1500;
+const CANDLE_CLOSE_REST_RETRY_DELAYS_MS = [8_000, 20_000, 40_000, 65_000, 90_000];
+const CANDLE_CORRECTION_POLL_MS = 15_000;
+const CACHE_VERSION = "v13";
 const FX_INTRADAY_MAX_HOURS = 48;
 const INDICATOR_WARMUP_BARS = 0;
 
@@ -143,6 +147,21 @@ const formatTMDate = (d, isIntraday) => {
   return `${y}-${mo}-${da} ${h}:${mi}`;
 };
 
+function startOfUtcDay(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
+}
+
+function floorToUtcHour(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), 0, 0, 0));
+}
+
+function ceilToUtcHour(date) {
+  const floored = floorToUtcHour(date);
+  return floored.getTime() === date.getTime()
+    ? floored
+    : new Date(floored.getTime() + MS_PER_HOUR);
+}
+
 function tickPrice(tick) {
   const price = tick?.mid ?? (
     tick?.bid != null && tick?.ask != null
@@ -150,6 +169,10 @@ function tickPrice(tick) {
       : tick?.bid ?? tick?.ask
   );
   return Number.isFinite(price) ? Number(price) : null;
+}
+
+function isChartTick(tick) {
+  return tick?.source !== "rest_live";
 }
 
 function tickTimestampMs(tick) {
@@ -167,6 +190,20 @@ function tickTimestampMs(tick) {
     if (Number.isFinite(parsed)) return parsed;
   }
   return Date.now();
+}
+
+function tickReceivedAtMs(tick) {
+  return Number.isFinite(tick?.receivedAt) ? tick.receivedAt : tickTimestampMs(tick);
+}
+
+function freshTickPriceForBucket(tick, tf, bucketStart) {
+  if (!isChartTick(tick)) return null;
+
+  const price = tickPrice(tick);
+  if (price == null) return null;
+
+  const receivedBucketStart = candleStartMs(tickReceivedAtMs(tick), tf);
+  return receivedBucketStart >= bucketStart ? price : null;
 }
 
 function candleStartMs(timestampMs, tf) {
@@ -188,13 +225,32 @@ function candleStartMs(timestampMs, tf) {
   return Date.UTC(year, month, day, hour, Math.floor(minute / tf.period) * tf.period, 0, 0);
 }
 
+function timeframeMs(tf) {
+  if (tf.interval === "daily") return tf.period * MS_PER_DAY;
+  if (tf.interval === "hourly") return tf.period * MS_PER_HOUR;
+  return tf.period * 60_000;
+}
+
+function nextCandleBoundaryMs(timestampMs, tf) {
+  return candleStartMs(timestampMs, tf) + timeframeMs(tf);
+}
+
 function candleFromTick(tick, tf) {
+  if (!isChartTick(tick)) return null;
+
   const price = tickPrice(tick);
   if (price == null) return null;
 
-  const bucketStart = candleStartMs(tickTimestampMs(tick), tf);
+  const sourceBucketStart = candleStartMs(tickTimestampMs(tick), tf);
+  const receivedAt = tickReceivedAtMs(tick);
+  const receivedBucketStart = candleStartMs(receivedAt, tf);
   const currentBucketStart = candleStartMs(Date.now(), tf);
-  if (bucketStart > currentBucketStart) return null;
+  if (sourceBucketStart > currentBucketStart) return null;
+
+  // Around candle boundaries the upstream tick timestamp can lag by a few
+  // seconds. Use the browser receipt bucket for live rendering so a new candle
+  // starts on time; the REST close poll corrects final OHLC shortly after.
+  const bucketStart = Math.max(sourceBucketStart, receivedBucketStart);
 
   return { t: bucketStart, o: price, h: price, l: price, c: price };
 }
@@ -237,11 +293,16 @@ function subtractMarketHours(end, hours, marketId) {
   return new Date(cursor);
 }
 
-function getFetchStart(end, hours, marketId) {
-  if (marketId !== "CRYPTO" && hours <= 48) {
-    return subtractMarketHours(end, hours, marketId);
+function getFetchStart(end, hours, marketId, options = {}) {
+  if (options.alignOneDayToUtcDay && hours <= 24 && end.getUTCHours() >= 12) {
+    return startOfUtcDay(end);
   }
-  return new Date(end.getTime() - hours * MS_PER_HOUR);
+
+  const rawStart = marketId !== "CRYPTO" && hours <= 48
+    ? subtractMarketHours(end, hours, marketId)
+    : new Date(end.getTime() - hours * MS_PER_HOUR);
+
+  return ceilToUtcHour(rawStart);
 }
 
 function getFetchEnd(end, marketId) {
@@ -302,10 +363,16 @@ function parseQuoteTimestampMs(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function parseQuotes(quotes) {
+function quoteDisplayTimeMs(timestampMs, tfObj) {
+  if (!Number.isFinite(timestampMs) || tfObj.interval === "daily") return timestampMs;
+  return timestampMs - timeframeMs(tfObj);
+}
+
+function parseQuotes(quotes, tfObj) {
   return quotes
     .map((q) => {
-      const t = parseQuoteTimestampMs(q.date ?? q.timestamp ?? q.time);
+      const rawTime = parseQuoteTimestampMs(q.date ?? q.timestamp ?? q.time);
+      const t = quoteDisplayTimeMs(rawTime, tfObj);
       let o = Number(q.open);
       const h = Number(q.high);
       const l = Number(q.low);
@@ -390,6 +457,7 @@ export default function TradingPortal() {
   const { ticks: liveTicks } = useSharedMarketData(liveSymbols);
   const liveTick = liveTicks[activeSym.sym];
   const liveTickRef = useRef(null);
+  const restAuthoritativeCandlesRef = useRef(new Set());
 
   useEffect(() => {
     liveTickRef.current = liveTick;
@@ -484,6 +552,7 @@ export default function TradingPortal() {
   // Wipe stale candles when the chart identity changes so timeframe/range
   // switches show the loader instead of rendering the previous dataset.
   useEffect(() => {
+    restAuthoritativeCandlesRef.current = new Set();
     setChartData([]);
     setChartDataSymbol(null);
     setChartWindowStartMs(null);
@@ -507,6 +576,12 @@ export default function TradingPortal() {
       const cached = getCachedTimeseries(activeSym.sym, tf.label, rangeHours, anchorKey);
       if (cached && (Date.now() - cached.lastFetch) < cacheTTL) {
         if (!cancelled) {
+          const currentBucketStart = candleStartMs(Date.now(), tf);
+          restAuthoritativeCandlesRef.current = new Set(
+            cached.data
+              .filter((bar) => Number.isFinite(bar?.t) && bar.t < currentBucketStart)
+              .map((bar) => bar.t)
+          );
           setChartReady(false);
           setChartData(cached.data);
           setChartDataSymbol(activeSym.sym);
@@ -543,14 +618,17 @@ export default function TradingPortal() {
         let end = anchorEnd ? new Date(anchorEnd.getTime()) : new Date(now.getTime());
         if (end > now) end = new Date(now.getTime());
         end = getFetchEnd(end, activeMarket.id);
-        let visibleStart = getFetchStart(end, clampedRange, activeMarket.id);
-        let start = getFetchStart(end, clampedRange + warmupHours, activeMarket.id);
+        const fetchStartOptions = {
+          alignOneDayToUtcDay: !anchorEnd && clampedRange <= 24,
+        };
+        let visibleStart = getFetchStart(end, clampedRange, activeMarket.id, fetchStartOptions);
+        let start = getFetchStart(end, clampedRange + warmupHours, activeMarket.id, fetchStartOptions);
         let newData = [];
         let lastEmptyError = "No valid quotes returned from API";
 
         for (let attempt = 0; attempt <= EMPTY_WINDOW_BACKTRACK_ATTEMPTS; attempt += 1) {
           const json = await fetchJson(buildUrl(start, end));
-          newData = parseQuotes(json.quotes);
+          newData = parseQuotes(json.quotes, tf);
           if (newData.length > 0) break;
 
           lastEmptyError = json.quotes.length === 0
@@ -560,13 +638,19 @@ export default function TradingPortal() {
           if (!canBacktrackEmptyWindow || attempt === EMPTY_WINDOW_BACKTRACK_ATTEMPTS) break;
 
           end = getFetchEnd(new Date(visibleStart.getTime() - 60_000), activeMarket.id);
-          visibleStart = getFetchStart(end, clampedRange, activeMarket.id);
-          start = getFetchStart(end, clampedRange + warmupHours, activeMarket.id);
+          visibleStart = getFetchStart(end, clampedRange, activeMarket.id, fetchStartOptions);
+          start = getFetchStart(end, clampedRange + warmupHours, activeMarket.id, fetchStartOptions);
         }
 
         if (newData.length === 0) throw new Error(lastEmptyError);
 
         if (!cancelled) {
+          const currentBucketStart = candleStartMs(Date.now(), tf);
+          restAuthoritativeCandlesRef.current = new Set(
+            newData
+              .filter((bar) => Number.isFinite(bar?.t) && bar.t < currentBucketStart)
+              .map((bar) => bar.t)
+          );
           setChartReady(false);
           setChartData(newData);
           setChartDataSymbol(activeSym.sym);
@@ -600,45 +684,82 @@ export default function TradingPortal() {
 
   /* ── Poll last bar every 30 s (live intraday only) ───────────────────── */
   useEffect(() => {
-    // Only poll in live mode for intraday timeframes
-    if (anchorEnd || tf.interval === "daily") return;
+    // Only poll in live mode. Historical anchored charts should stay fixed.
+    if (anchorEnd) return;
 
     const isCrypto = activeMarket.id === "CRYPTO";
-    // Fetch last 2 periods to capture a forming bar + the bar before it
-    const lookbackMs = tf.period * 2 * (tf.interval === "hourly" ? 3_600_000 : 60_000);
+    const isIntraday = tf.interval !== "daily";
+    // TraderMade can publish a closed intraday candle up to ~60s late, so keep
+    // re-checking several recent candles and let REST correct their OHLC.
+    const lookbackMs = timeframeMs(tf) * (isIntraday ? 8 : 5);
     const weekendParam = isCrypto ? "&weekend=true" : "";
+    let cancelled = false;
+    const boundaryTimers = [];
+
+    const ensureCurrentBucket = () => {
+      const currentBucketStart = candleStartMs(Date.now(), tf);
+      setChartData((prev) => {
+        if (prev.length === 0) return prev;
+        const last = prev[prev.length - 1];
+        if (!Number.isFinite(last?.t) || currentBucketStart <= last.t) return prev;
+
+        const price = freshTickPriceForBucket(liveTickRef.current, tf, currentBucketStart);
+        if (!Number.isFinite(price) || price <= 0) return prev;
+
+        return [
+          ...prev,
+          { t: currentBucketStart, o: price, h: price, l: price, c: price },
+        ];
+      });
+    };
 
     const poll = async () => {
       try {
+        if (cancelled) return;
         const now   = new Date();
-        const start = new Date(now.getTime() - lookbackMs);
+        const start = floorToUtcHour(new Date(now.getTime() - lookbackMs));
         const url =
           `/api/timeseries` +
           `?currency=${activeSym.sym}` +
-          `&start_date=${formatTMDate(start, true)}` +
-          `&end_date=${formatTMDate(now, true)}` +
+          `&start_date=${formatTMDate(start, isIntraday)}` +
+          `&end_date=${formatTMDate(now, isIntraday)}` +
           `&interval=${tf.interval}&period=${tf.period}` +
           `&format=records${weekendParam}`;
 
-        const res  = await fetch(url);
+        const res  = await fetch(url, { cache: "no-store" });
+        if (cancelled) return;
         if (!res.ok) return;
         const json = await res.json();
+        if (cancelled) return;
         if (!Array.isArray(json.quotes) || json.quotes.length === 0) return;
 
-        const incoming = parseQuotes(json.quotes);
+        const incoming = parseQuotes(json.quotes, tf);
+        if (incoming.length === 0) return;
 
         setChartData((prev) => {
           if (prev.length === 0) return prev;
 
+          const currentBucketStart = candleStartMs(Date.now(), tf);
           let next = [...prev];
           for (const bar of incoming) {
             const idx = next.findIndex((b) => b.t === bar.t);
+            // REST may correct the active bucket if WS already created it, but
+            // should not create a new active bucket by itself. That keeps the
+            // live candle close aligned with timeseries without reintroducing
+            // stale REST/snapshot gap candles.
+            if (bar.t >= currentBucketStart && idx < 0) continue;
             if (idx >= 0) {
               // Update existing bar (still forming)
               next[idx] = bar;
+              if (bar.t < currentBucketStart) {
+                restAuthoritativeCandlesRef.current.add(bar.t);
+              }
             } else if (bar.t > next[next.length - 1].t) {
               // New minute rolled — append
               next.push(bar);
+              if (bar.t < currentBucketStart) {
+                restAuthoritativeCandlesRef.current.add(bar.t);
+              }
             }
           }
 
@@ -654,9 +775,60 @@ export default function TradingPortal() {
       } catch { /* silent - don't disrupt chart on poll failure */ }
     };
 
-    const id = setInterval(poll, 30_000);
-    return () => clearInterval(id);
+    const scheduleBoundaryPoll = () => {
+      if (cancelled) return;
+      const boundary = nextCandleBoundaryMs(Date.now(), tf);
+      const delay = Math.max(
+        1000,
+        boundary - Date.now() + CANDLE_CLOSE_REST_DELAY_MS,
+      );
+      const timer = window.setTimeout(async () => {
+        ensureCurrentBucket();
+        await poll();
+        CANDLE_CLOSE_REST_RETRY_DELAYS_MS.forEach((retryDelay) => {
+          const retryIn = boundary + retryDelay - Date.now();
+          if (retryIn <= 500 || cancelled) return;
+          boundaryTimers.push(window.setTimeout(poll, retryIn));
+        });
+        scheduleBoundaryPoll();
+      }, delay);
+      boundaryTimers.push(timer);
+    };
+
+    scheduleBoundaryPoll();
+    const intervalId = isIntraday ? setInterval(poll, CANDLE_CORRECTION_POLL_MS) : 0;
+    return () => {
+      cancelled = true;
+      boundaryTimers.forEach((timer) => clearTimeout(timer));
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [activeSym.sym, tf, activeMarket, rangeHours, anchorEnd, chartWindowStartMs]);
+
+  useEffect(() => {
+    if (anchorEnd) return undefined;
+
+    const ensureCurrentBucket = () => {
+      const currentBucketStart = candleStartMs(Date.now(), tf);
+      setChartData((prev) => {
+        if (prev.length === 0) return prev;
+        const last = prev[prev.length - 1];
+        if (!Number.isFinite(last?.t) || currentBucketStart <= last.t) return prev;
+
+        const price = freshTickPriceForBucket(liveTickRef.current, tf, currentBucketStart);
+        if (!Number.isFinite(price) || price <= 0) return prev;
+
+        setChartDataSymbol(activeSym.sym);
+        return [
+          ...prev,
+          { t: currentBucketStart, o: price, h: price, l: price, c: price },
+        ];
+      });
+    };
+
+    ensureCurrentBucket();
+    const intervalId = setInterval(ensureCurrentBucket, 1000);
+    return () => clearInterval(intervalId);
+  }, [activeSym.sym, anchorEnd, tf]);
 
   /* ── Infinite history (load older candles when user drags left) ─────── */
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -682,7 +854,7 @@ export default function TradingPortal() {
       const maxH = getMaxWindowHours(tf, activeMarket.id);
       // Fetch one full max-window worth of older data per request.
       const end = new Date(beforeTimestampMs - 1000); // 1s before the oldest candle
-      const start = new Date(end.getTime() - maxH * MS_PER_HOUR);
+      const start = ceilToUtcHour(new Date(end.getTime() - maxH * MS_PER_HOUR));
 
       const weekendParam = isCrypto ? "&weekend=true" : "";
       const url =
@@ -701,7 +873,7 @@ export default function TradingPortal() {
         return;
       }
 
-      const older = parseQuotes(json.quotes);
+      const older = parseQuotes(json.quotes, tf);
       if (older.length === 0) {
         historyExhaustedRef.current = true;
         return;
@@ -739,9 +911,11 @@ export default function TradingPortal() {
     setChartData((prev) => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
+      const currentBucketStart = candleStartMs(Date.now(), tf);
 
       // Tick belongs to an already-closed bar (older bucket) → ignore.
-      if (tickCandle.t < last.t) return prev;
+      if (tickCandle.t < currentBucketStart && restAuthoritativeCandlesRef.current.has(tickCandle.t)) return prev;
+      if (tickCandle.t < last.t && currentBucketStart <= last.t) return prev;
 
       const next = [...prev];
       if (tickCandle.t === last.t) {
@@ -758,7 +932,11 @@ export default function TradingPortal() {
       }
 
       // New bucket has started — push a fresh candle.
-      next.push(tickCandle);
+      if (tickCandle.t > last.t) {
+        next.push(tickCandle);
+      } else if (currentBucketStart > last.t) {
+        next.push({ ...tickCandle, t: currentBucketStart });
+      }
       return next;
     });
   }, [activeSym.sym, anchorEnd, liveTick, tf]);

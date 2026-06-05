@@ -2,13 +2,23 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSharedMarketData } from "../context/MarketDataContext.jsx";
 import GainersLosers from "../components/GainersLosers";
-import { CURRENCY_PAIRS, CRYPTO_PAIRS, US_STOCKS } from "../constants/constants";
+import {
+  CURRENCY_PAIRS,
+  CRYPTO_PAIRS,
+  ENERGIES_CFD,
+  INDICES_CFD,
+  METALS_CFD,
+  US_STOCKS,
+} from "../constants/constants";
 import { LIVE_RATES_MAX_SYMBOLS, loadLiveRateTickers, saveLiveRateTickers } from "../constants/liveRates";
 import { brandBadge, brandName } from "../config/branding";
 
 /* ── Static data ────────────────────────────────────────────────────────── */
 const ALL_PAIRS = [
   ...CURRENCY_PAIRS.map(p => ({ ...p, market: "FX" })),
+  ...METALS_CFD.map(p => ({ ...p, market: "Metals CFD" })),
+  ...ENERGIES_CFD.map(p => ({ ...p, market: "Energies CFD" })),
+  ...INDICES_CFD.map(p => ({ ...p, market: "Indices CFD" })),
   ...CRYPTO_PAIRS.map(p => ({ ...p, market: "Crypto" })),
   ...US_STOCKS.map(p => ({ ...p, market: "Equities" })),
 ];
@@ -265,9 +275,10 @@ export default function LiveRates() {
     !search ||
     p.sym.toLowerCase().includes(search.toLowerCase()) ||
     (p.name ?? "").toLowerCase().includes(search.toLowerCase()) ||
-    p.quote.toLowerCase().includes(search.toLowerCase())
+    p.quote.toLowerCase().includes(search.toLowerCase()) ||
+    p.market.toLowerCase().includes(search.toLowerCase())
   );
-  const grouped = ["FX","Crypto","Equities"]
+  const grouped = ["FX", "Metals CFD", "Energies CFD", "Indices CFD", "Crypto", "Equities"]
     .map(m => ({ market: m, pairs: filtered.filter(p => p.market === m) }))
     .filter(g => g.pairs.length > 0);
 

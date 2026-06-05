@@ -27,8 +27,8 @@ const wss = new WebSocketServer({ server });
 // names so existing .env files keep working. Server-only vars don't need
 // the VITE_ prefix — that prefix is only required for variables the browser
 // bundle reads via import.meta.env.
-const REST_API_KEY = process.env.TRADERMADE_API_KEY    || process.env.VITE_TRADERMADE_API_KEY;
-const API_KEY      = process.env.TRADERMADE_WS_API_KEY || process.env.VITE_TRADERMADE_WS_API_KEY;
+const REST_API_KEY = process.env.TRADERMADE_API_KEY    
+const API_KEY      = process.env.TRADERMADE_WS_API_KEY 
 
 if (!API_KEY) {
   console.error("❌ FATAL: TRADERMADE_WS_API_KEY is missing in your .env file!");
@@ -92,18 +92,19 @@ function getMaxSpanMs(interval, period) {
 function clampRequestWindow(start, end, interval, period) {
   if (!start || !end) return { start, end };
 
-  const bucket = bucketDurationMs(interval, period);
   // Use TraderMade's perceived "now" (learned from response Date headers) so
   // we don't send end_date past their clock. Fall back to local clock if we
   // haven't yet seen a response.
   const tmNowMs = tmNow();
-  // Stay (one bucket or 60s, whichever larger) behind their "now"
-  const safetyMs = Math.max(bucket, 60_000);
+  // Keep only a small safety buffer. Subtracting a whole candle bucket makes
+  // 15m/30m/1h/4h charts miss the latest already-closed candle.
+  const safetyMs = 60_000;
   const safeNow = new Date(tmNowMs - safetyMs);
   let safeEnd = end > safeNow ? safeNow : end;
   let safeStart = start;
 
   if (safeStart >= safeEnd) {
+    const bucket = bucketDurationMs(interval, period);
     safeStart = new Date(safeEnd.getTime() - bucket);
   }
 
@@ -239,8 +240,7 @@ async function fetchChunk(currency, start, end, interval, period, format, weeken
       // response's Date header) minus a safety bucket.
       const msg = String(error?.message || "");
       if (error?.status === 400 && /end_date.*future/i.test(msg) && !customEnd) {
-        const bucket = bucketDurationMs(interval, period);
-        const safeEnd = new Date(tmNow() - Math.max(bucket, 60_000));
+        const safeEnd = new Date(tmNow() - 60_000);
         console.warn(`📅 TM rejected end_date as future; retrying with clamped end_date=${fmtDate(safeEnd, intraday)} (TM clock offset: ${tmClockOffsetMs}ms)`);
         return fetchRequest(weekendValue, safeEnd);
       }
@@ -678,6 +678,7 @@ async function fetchAndPushLiveRates(symbols) {
         bid,
         ask,
         mid,
+        source: "rest_live",
         timestamp: quote.timestamp ?? quote.ts ?? data.requested_time,
       });
       rememberPrice(symbol, msg);
@@ -863,6 +864,7 @@ function connectUpstream() {
         bidVolume: parsed.bv,
         askVolume: parsed.av,
         type: parsed.t,
+        source: "ws",
         timestamp: parsed.ts,
       };
       // Use TraderMade's mid when present (ladder ticks include it); otherwise fall back.
